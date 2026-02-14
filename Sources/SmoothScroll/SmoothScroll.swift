@@ -2,21 +2,179 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import IOKit
+import IOKit.hidsystem
+
+enum TuningLimits {
+    static let speed: ClosedRange<Double> = 1.0...1000.0
+    static let smoothness: ClosedRange<Double> = 0.0...0.995
+    static let decay: ClosedRange<Double> = 0.1...120.0
+    static let fps: ClosedRange<Double> = 30.0...360.0
+    static let pointerSpeed: ClosedRange<Double> = 0.0...10.0
+}
+
+private func clampValue(_ value: Double, to range: ClosedRange<Double>) -> Double {
+    max(range.lowerBound, min(value, range.upperBound))
+}
+
+enum PointerSpeedManager {
+    private static let mouseKey = "com.apple.mouse.scaling"
+    private static let trackpadKey = "com.apple.trackpad.scaling"
+    private static let hidAccelerationKeys = [
+        "HIDPointerAcceleration",
+        "HIDMouseAcceleration",
+        "HIDTrackpadAcceleration"
+    ]
+    private static let fallbackPointerSpeed = 5.0
+    private static let systemRange: ClosedRange<Double> = 0.0...10.0
+
+    static func currentSystemValue() -> Double {
+        if let systemValue = readRuntimeSystemSpeed() {
+            return uiSpeed(fromSystem: systemValue)
+        }
+
+        if let systemValue = readCurrentSystemSpeed() {
+            return uiSpeed(fromSystem: systemValue)
+        }
+
+        return fallbackPointerSpeed
+    }
+
+    static func apply(_ pointerSpeed: Double) {
+        let uiValue = clampValue(pointerSpeed, to: TuningLimits.pointerSpeed)
+        let systemValue = systemSpeed(fromUI: uiValue)
+        applyRuntimeSystemSpeed(systemValue)
+
+        for key in [mouseKey, trackpadKey] {
+            write(systemValue, key: key, host: kCFPreferencesCurrentHost)
+            write(systemValue, key: key, host: kCFPreferencesAnyHost)
+        }
+    }
+
+    private static func readCurrentSystemSpeed() -> Double? {
+        for key in [mouseKey, trackpadKey] {
+            if let value = read(key: key, host: kCFPreferencesCurrentHost) {
+                return clampValue(value, to: systemRange)
+            }
+
+            if let value = read(key: key, host: kCFPreferencesAnyHost) {
+                return clampValue(value, to: systemRange)
+            }
+        }
+
+        return nil
+    }
+
+    private static func readRuntimeSystemSpeed() -> Double? {
+        withHIDEventStatusHandle { handle in
+            for key in hidAccelerationKeys {
+                var value = 0.0
+                if IOHIDGetAccelerationWithKey(handle, key as CFString, &value) == KERN_SUCCESS {
+                    return clampValue(value, to: systemRange)
+                }
+            }
+            return nil
+        }
+    }
+
+    private static func applyRuntimeSystemSpeed(_ value: Double) {
+        _ = withHIDEventStatusHandle { handle in
+            for key in hidAccelerationKeys {
+                _ = IOHIDSetAccelerationWithKey(handle, key as CFString, value)
+            }
+            return true
+        }
+    }
+
+    private static func withHIDEventStatusHandle<T>(_ body: (NXEventHandle) -> T?) -> T? {
+        let handle = NXOpenEventStatus()
+        guard handle != 0 else {
+            return nil
+        }
+        defer {
+            NXCloseEventStatus(handle)
+        }
+        return body(handle)
+    }
+
+    private static func read(key: String, host: CFString) -> Double? {
+        guard let value = CFPreferencesCopyValue(
+            key as CFString,
+            kCFPreferencesAnyApplication,
+            kCFPreferencesCurrentUser,
+            host
+        ) else {
+            return nil
+        }
+
+        if let number = value as? NSNumber {
+            return number.doubleValue
+        }
+
+        if let text = value as? String {
+            return Double(text)
+        }
+
+        return nil
+    }
+
+    private static func write(_ value: Double, key: String, host: CFString) {
+        let number = NSNumber(value: value)
+        CFPreferencesSetValue(
+            key as CFString,
+            number,
+            kCFPreferencesAnyApplication,
+            kCFPreferencesCurrentUser,
+            host
+        )
+        _ = CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, host)
+    }
+
+    private static func systemSpeed(fromUI uiSpeed: Double) -> Double {
+        let uiSpan = TuningLimits.pointerSpeed.upperBound - TuningLimits.pointerSpeed.lowerBound
+        guard uiSpan > 0 else {
+            return systemRange.lowerBound
+        }
+
+        let systemSpan = systemRange.upperBound - systemRange.lowerBound
+        let normalized = (uiSpeed - TuningLimits.pointerSpeed.lowerBound) / uiSpan
+        return clampValue(systemRange.lowerBound + normalized * systemSpan, to: systemRange)
+    }
+
+    private static func uiSpeed(fromSystem systemSpeed: Double) -> Double {
+        let systemSpan = systemRange.upperBound - systemRange.lowerBound
+        guard systemSpan > 0 else {
+            return TuningLimits.pointerSpeed.lowerBound
+        }
+
+        let uiSpan = TuningLimits.pointerSpeed.upperBound - TuningLimits.pointerSpeed.lowerBound
+        let normalized = (systemSpeed - systemRange.lowerBound) / systemSpan
+        return clampValue(TuningLimits.pointerSpeed.lowerBound + normalized * uiSpan, to: TuningLimits.pointerSpeed)
+    }
+}
 
 struct EngineSettings {
     var speed: Double
     var smoothness: Double
     var decay: Double
     var fps: Double
+    var pointerSpeed: Double
 
-    static let `default` = EngineSettings(speed: 100.0, smoothness: 0.80, decay: 28.0, fps: 120.0)
+    static let `default` = EngineSettings(
+        speed: 100.0,
+        smoothness: 0.80,
+        decay: 28.0,
+        fps: 120.0,
+        pointerSpeed: PointerSpeedManager.currentSystemValue()
+    )
 
     var clamped: EngineSettings {
         EngineSettings(
-            speed: max(1.0, min(speed, 160.0)),
-            smoothness: max(0.0, min(smoothness, 0.98)),
-            decay: max(0.1, min(decay, 40.0)),
-            fps: max(30.0, min(fps, 240.0))
+            speed: clampValue(speed, to: TuningLimits.speed),
+            smoothness: clampValue(smoothness, to: TuningLimits.smoothness),
+            decay: clampValue(decay, to: TuningLimits.decay),
+            fps: clampValue(fps, to: TuningLimits.fps),
+            pointerSpeed: clampValue(pointerSpeed, to: TuningLimits.pointerSpeed)
         )
     }
 }
@@ -27,6 +185,7 @@ struct CLIOptions {
     var smoothness: Double?
     var decay: Double?
     var fps: Double?
+    var pointerSpeed: Double?
 
     func applyingOverrides(to settings: EngineSettings) -> EngineSettings {
         var updated = settings
@@ -34,6 +193,7 @@ struct CLIOptions {
         if let smoothness { updated.smoothness = smoothness }
         if let decay { updated.decay = decay }
         if let fps { updated.fps = fps }
+        if let pointerSpeed { updated.pointerSpeed = pointerSpeed }
         return updated.clamped
     }
 
@@ -54,6 +214,8 @@ struct CLIOptions {
                 options.decay = parseValue(flag: "--decay", index: &index)
             case "--fps":
                 options.fps = parseValue(flag: "--fps", index: &index)
+            case "--pointer-speed":
+                options.pointerSpeed = parseValue(flag: "--pointer-speed", index: &index)
             case "--help", "-h":
                 printUsageAndExit(code: 0)
             default:
@@ -83,17 +245,18 @@ struct CLIOptions {
 
         Usage:
           SmoothScroll
-          SmoothScroll --headless [--speed N] [--smoothness 0..1] [--decay N] [--fps N]
+          SmoothScroll --headless [--speed N] [--smoothness 0..1] [--decay N] [--fps N] [--pointer-speed N]
 
         Modes:
           (default)      Starts menu bar app with on/off toggle and sliders
           --headless     Starts engine without menu bar UI (terminal mode)
 
         Options:
-          --speed        Scroll strength per wheel notch (default: \(EngineSettings.default.speed))
-          --smoothness   Input blending amount, higher = smoother/slower response (default: \(EngineSettings.default.smoothness))
-          --decay        Velocity damping per second, higher = shorter glide (default: \(EngineSettings.default.decay))
-          --fps          Output event rate in Hz (30..240, default: \(EngineSettings.default.fps))
+          --speed        Scroll strength per wheel notch (\(Int(TuningLimits.speed.lowerBound))..\((Int(TuningLimits.speed.upperBound))), default: \(EngineSettings.default.speed))
+          --smoothness   Input blending amount (\(String(format: "%.2f", TuningLimits.smoothness.lowerBound))..\((String(format: "%.3f", TuningLimits.smoothness.upperBound))), default: \(EngineSettings.default.smoothness))
+          --decay        Velocity damping per second (\(String(format: "%.1f", TuningLimits.decay.lowerBound))..\((String(format: "%.1f", TuningLimits.decay.upperBound))), default: \(EngineSettings.default.decay))
+          --fps          Output event rate in Hz (\(Int(TuningLimits.fps.lowerBound))..\((Int(TuningLimits.fps.upperBound))), default: \(EngineSettings.default.fps))
+          --pointer-speed Cursor tracking speed (\(String(format: "%.1f", TuningLimits.pointerSpeed.lowerBound))..\((String(format: "%.1f", TuningLimits.pointerSpeed.upperBound))), default: \(String(format: "%.1f", EngineSettings.default.pointerSpeed)))
         """
 
         if code == 0 {
@@ -111,8 +274,9 @@ enum SettingsStore {
     private static let keySmoothness = "smoothscroll.smoothness"
     private static let keyDecay = "smoothscroll.decay"
     private static let keyFPS = "smoothscroll.fps"
+    private static let keyPointerSpeed = "smoothscroll.pointerSpeed"
     private static let keyDefaultsVersion = "smoothscroll.defaultsVersion"
-    private static let currentDefaultsVersion = 2
+    private static let currentDefaultsVersion = 3
 
     static func loadSettings() -> EngineSettings {
         let defaults = UserDefaults.standard
@@ -122,8 +286,15 @@ enum SettingsStore {
         let smoothness = defaults.object(forKey: keySmoothness) as? Double ?? EngineSettings.default.smoothness
         let decay = defaults.object(forKey: keyDecay) as? Double ?? EngineSettings.default.decay
         let fps = defaults.object(forKey: keyFPS) as? Double ?? EngineSettings.default.fps
+        let pointerSpeed = defaults.object(forKey: keyPointerSpeed) as? Double ?? PointerSpeedManager.currentSystemValue()
 
-        return EngineSettings(speed: speed, smoothness: smoothness, decay: decay, fps: fps).clamped
+        return EngineSettings(
+            speed: speed,
+            smoothness: smoothness,
+            decay: decay,
+            fps: fps,
+            pointerSpeed: pointerSpeed
+        ).clamped
     }
 
     static func saveSettings(_ settings: EngineSettings) {
@@ -133,6 +304,7 @@ enum SettingsStore {
         defaults.set(clamped.smoothness, forKey: keySmoothness)
         defaults.set(clamped.decay, forKey: keyDecay)
         defaults.set(clamped.fps, forKey: keyFPS)
+        defaults.set(clamped.pointerSpeed, forKey: keyPointerSpeed)
     }
 
     static func loadEnabled() -> Bool {
@@ -155,20 +327,28 @@ enum SettingsStore {
         let hadAnySavedValues = defaults.object(forKey: keySpeed) != nil ||
             defaults.object(forKey: keySmoothness) != nil ||
             defaults.object(forKey: keyDecay) != nil ||
-            defaults.object(forKey: keyFPS) != nil
+            defaults.object(forKey: keyFPS) != nil ||
+            defaults.object(forKey: keyPointerSpeed) != nil
 
         if !hadAnySavedValues || hasLegacyDefaultValues(defaults) {
             defaults.set(EngineSettings.default.speed, forKey: keySpeed)
             defaults.set(EngineSettings.default.smoothness, forKey: keySmoothness)
             defaults.set(EngineSettings.default.decay, forKey: keyDecay)
             defaults.set(EngineSettings.default.fps, forKey: keyFPS)
+            defaults.set(EngineSettings.default.pointerSpeed, forKey: keyPointerSpeed)
         }
 
         defaults.set(currentDefaultsVersion, forKey: keyDefaultsVersion)
     }
 
     private static func hasLegacyDefaultValues(_ defaults: UserDefaults) -> Bool {
-        let legacy = EngineSettings(speed: 42.0, smoothness: 0.75, decay: 12.0, fps: 120.0)
+        let legacy = EngineSettings(
+            speed: 42.0,
+            smoothness: 0.75,
+            decay: 12.0,
+            fps: 120.0,
+            pointerSpeed: PointerSpeedManager.currentSystemValue()
+        )
 
         let speed = defaults.object(forKey: keySpeed) as? Double ?? legacy.speed
         let smoothness = defaults.object(forKey: keySmoothness) as? Double ?? legacy.smoothness
@@ -576,11 +756,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var launchAtLoginItem: NSMenuItem?
 
     private var speedSlider: NSSlider?
+    private var pointerSpeedSlider: NSSlider?
     private var smoothnessSlider: NSSlider?
     private var decaySlider: NSSlider?
     private var fpsSlider: NSSlider?
 
     private var speedLabel: NSTextField?
+    private var pointerSpeedLabel: NSTextField?
     private var smoothnessLabel: NSTextField?
     private var decayLabel: NSTextField?
     private var fpsLabel: NSTextField?
@@ -595,6 +777,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         constructMenuBarUI()
+        applySystemPointerSpeed()
         applyEngineEnabledState(promptForPermissions: true)
         updateMenuState()
     }
@@ -643,6 +826,12 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func smoothnessChanged(_ sender: NSSlider) {
         settings.smoothness = (sender.doubleValue * 100).rounded() / 100
         sender.doubleValue = settings.smoothness
+        saveAndApplySettings()
+    }
+
+    @objc private func pointerSpeedChanged(_ sender: NSSlider) {
+        settings.pointerSpeed = (sender.doubleValue * 10).rounded() / 10
+        sender.doubleValue = settings.pointerSpeed
         saveAndApplySettings()
     }
 
@@ -698,19 +887,30 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let speedRow = makeSliderRow(
             title: "Speed",
             value: settings.speed,
-            min: 5,
-            max: 120,
+            min: TuningLimits.speed.lowerBound,
+            max: TuningLimits.speed.upperBound,
             action: #selector(speedChanged(_:))
         )
         speedSlider = speedRow.slider
         speedLabel = speedRow.valueLabel
         menu.addItem(speedRow.item)
 
+        let pointerSpeedRow = makeSliderRow(
+            title: "Pointer Speed",
+            value: settings.pointerSpeed,
+            min: TuningLimits.pointerSpeed.lowerBound,
+            max: TuningLimits.pointerSpeed.upperBound,
+            action: #selector(pointerSpeedChanged(_:))
+        )
+        pointerSpeedSlider = pointerSpeedRow.slider
+        pointerSpeedLabel = pointerSpeedRow.valueLabel
+        menu.addItem(pointerSpeedRow.item)
+
         let smoothnessRow = makeSliderRow(
             title: "Smoothness",
             value: settings.smoothness,
-            min: 0,
-            max: 0.95,
+            min: TuningLimits.smoothness.lowerBound,
+            max: TuningLimits.smoothness.upperBound,
             action: #selector(smoothnessChanged(_:))
         )
         smoothnessSlider = smoothnessRow.slider
@@ -720,8 +920,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let decayRow = makeSliderRow(
             title: "Decay",
             value: settings.decay,
-            min: 2,
-            max: 30,
+            min: TuningLimits.decay.lowerBound,
+            max: TuningLimits.decay.upperBound,
             action: #selector(decayChanged(_:))
         )
         decaySlider = decayRow.slider
@@ -731,8 +931,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let fpsRow = makeSliderRow(
             title: "FPS",
             value: settings.fps,
-            min: 60,
-            max: 240,
+            min: TuningLimits.fps.lowerBound,
+            max: TuningLimits.fps.upperBound,
             action: #selector(fpsChanged(_:))
         )
         fpsSlider = fpsRow.slider
@@ -848,8 +1048,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func saveAndApplySettings() {
         settings = settings.clamped
         persistSettings()
+        applySystemPointerSpeed()
         engine.updateSettings(settings)
         updateMenuState()
+    }
+
+    private func applySystemPointerSpeed() {
+        PointerSpeedManager.apply(settings.pointerSpeed)
     }
 
     private func persistSettings() {
@@ -862,11 +1067,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         enabledItem?.state = engineEnabled ? .on : .off
 
         speedSlider?.doubleValue = settings.speed
+        pointerSpeedSlider?.doubleValue = settings.pointerSpeed
         smoothnessSlider?.doubleValue = settings.smoothness
         decaySlider?.doubleValue = settings.decay
         fpsSlider?.doubleValue = settings.fps
 
         speedLabel?.stringValue = String(format: "%.0f", settings.speed)
+        pointerSpeedLabel?.stringValue = String(format: "%.1f", settings.pointerSpeed)
         smoothnessLabel?.stringValue = String(format: "%.2f", settings.smoothness)
         decayLabel?.stringValue = String(format: "%.1f", settings.decay)
         fpsLabel?.stringValue = String(format: "%.0f", settings.fps)
@@ -919,6 +1126,7 @@ struct SmoothScroll {
 
     private static func runHeadless(options: CLIOptions) {
         let settings = options.applyingOverrides(to: EngineSettings.default)
+        PointerSpeedManager.apply(settings.pointerSpeed)
         let engine = ScrollEngine(settings: settings)
 
         guard engine.start(promptForPermissions: true) else {
@@ -929,7 +1137,9 @@ struct SmoothScroll {
         engine.setEnabled(true)
 
         print("SmoothScroll headless mode running. Press Ctrl+C to stop.")
-        print("Config: speed=\(settings.speed), smoothness=\(settings.smoothness), decay=\(settings.decay), fps=\(settings.fps)")
+        print(
+            "Config: speed=\(settings.speed), smoothness=\(settings.smoothness), decay=\(settings.decay), fps=\(settings.fps), pointerSpeed=\(settings.pointerSpeed)"
+        )
 
         RunLoop.main.run()
     }

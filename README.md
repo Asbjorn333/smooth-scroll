@@ -14,7 +14,7 @@ SmoothScroll is a native macOS menu bar app that makes mouse wheel scrolling fee
 
 - Menu bar app with icon
 - `Enabled` toggle
-- Live tuning sliders for `Speed`, `Smoothness`, `Decay`, and `FPS`
+- Live tuning sliders for `Speed`, `Pointer Speed`, `Smoothness`, `Decay`, and `FPS`
 - `Save Settings` action
 - Auto-save of settings via `UserDefaults`
 - `Launch at Login` toggle
@@ -49,15 +49,25 @@ Without these permissions, event capture cannot work.
 
 - `Enabled`: turns smoothing on/off
 - `Speed`: stronger scroll output per wheel notch
+- `Pointer Speed`: controls macOS cursor tracking for both mouse and trackpad (`com.apple.mouse.scaling` + `com.apple.trackpad.scaling`)
 - `Smoothness`: higher value = softer, more blended response
 - `Decay`: higher value = shorter glide tail
 - `FPS`: output update rate
 - `Save Settings`: explicit manual save (slider changes are also auto-saved)
 - `Launch at Login`: installs/removes a LaunchAgent
 
+## Tuning ranges
+
+- `Speed`: `1..1000`
+- `Pointer Speed`: `0.0..10.0` (applies to global + runtime HID acceleration)
+- `Smoothness`: `0.00..0.995`
+- `Decay`: `0.1..120.0`
+- `FPS`: `30..360`
+
 ## Default profile
 
 - `Speed`: `100`
+- `Pointer Speed`: uses current macOS pointer speed on first launch
 - `Smoothness`: `0.80`
 - `Decay`: `28.0`
 - `FPS`: `120`
@@ -79,7 +89,7 @@ swift run SmoothScroll --headless
 Headless with custom tuning:
 
 ```bash
-swift run SmoothScroll --headless --speed 100 --smoothness 0.80 --decay 28 --fps 120
+swift run SmoothScroll --headless --speed 100 --pointer-speed 2.0 --smoothness 0.80 --decay 28 --fps 120
 ```
 
 ## App bundle scripts
@@ -94,6 +104,18 @@ Install `.app` to Desktop:
 
 ```bash
 ./scripts/install-app.sh
+```
+
+Update existing installed app in place (auto-detects `~/Applications`, `/Applications`, or `~/Desktop`):
+
+```bash
+./scripts/update-app.sh
+```
+
+Update a specific installed app path:
+
+```bash
+./scripts/update-app.sh "/Applications/SmoothScroll.app"
 ```
 
 Install to custom directory:
@@ -154,6 +176,7 @@ Scrolling feels too fast or too floaty:
 - `scripts/build-app.sh`: builds `.app` bundle
 - `scripts/generate-icon.sh`: generates `AppIcon.icns`
 - `scripts/install-app.sh`: installs app to Desktop or custom dir
+- `scripts/update-app.sh`: rebuilds and updates an installed app path
 - `scripts/install-launch-agent.sh`: optional LaunchAgent installer
 
 ## Privacy
