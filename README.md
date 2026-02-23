@@ -14,6 +14,7 @@ SmoothScroll is a native macOS menu bar app that makes mouse wheel scrolling fee
 
 - Menu bar app with icon
 - `Enabled` toggle
+- `Keyboard Cleaning` mode toggle
 - Live tuning sliders for `Speed`, `Pointer Speed`, `Smoothness`, `Decay`, and `FPS`
 - `Save Settings` action
 - Auto-save of settings via `UserDefaults`
@@ -48,6 +49,7 @@ Without these permissions, event capture cannot work.
 ## Menu controls
 
 - `Enabled`: turns smoothing on/off
+- `Enable Keyboard Cleaning`: blocks keyboard input globally so you can clean the keyboard safely with mouse/trackpad still active; auto-disables after 2 minutes
 - `Speed`: stronger scroll output per wheel notch
 - `Pointer Speed`: controls macOS cursor tracking for both mouse and trackpad (`com.apple.mouse.scaling` + `com.apple.trackpad.scaling`)
 - `Smoothness`: higher value = softer, more blended response

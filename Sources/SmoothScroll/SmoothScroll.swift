@@ -450,6 +450,110 @@ final class LaunchAgentManager {
     }
 }
 
+final class KeyboardCleaningManager {
+    private var tap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var running = false
+
+    func start(promptForPermissions: Bool) -> Bool {
+        guard !running else {
+            return true
+        }
+
+        guard requestAccessibilityTrust(prompt: promptForPermissions) else {
+            return false
+        }
+
+        guard setupEventTap() else {
+            return false
+        }
+
+        running = true
+        return true
+    }
+
+    func stop() {
+        guard running else {
+            return
+        }
+
+        running = false
+
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            runLoopSource = nil
+        }
+
+        if let tap {
+            CFMachPortInvalidate(tap)
+            self.tap = nil
+        }
+    }
+
+    private func requestAccessibilityTrust(prompt: Bool) -> Bool {
+        if AXIsProcessTrusted() {
+            return true
+        }
+
+        guard prompt else {
+            return false
+        }
+
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
+    }
+
+    private func setupEventTap() -> Bool {
+        var keyEventTypes: [CGEventType] = [.keyDown, .keyUp, .flagsChanged]
+        if let systemDefinedType = CGEventType(rawValue: 14) {
+            keyEventTypes.append(systemDefinedType)
+        }
+        let mask = keyEventTypes.reduce(CGEventMask(0)) { partialMask, type in
+            partialMask | CGEventMask(1 << type.rawValue)
+        }
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: keyboardCleaningTapCallback,
+            userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        ) else {
+            return false
+        }
+
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            return false
+        }
+
+        self.tap = tap
+        self.runLoopSource = source
+
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        return true
+    }
+
+    fileprivate func handleEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passRetained(event)
+        }
+
+        let isSystemDefined = CGEventType(rawValue: 14) == type
+        switch type {
+        case .keyDown, .keyUp, .flagsChanged:
+            return nil
+        default:
+            return isSystemDefined ? nil : Unmanaged.passRetained(event)
+        }
+    }
+}
+
 final class ScrollEngine {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "smoothscroll.engine", qos: .userInteractive)
@@ -740,20 +844,35 @@ private let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
     return engine.handleEvent(type: type, event: event)
 }
 
+private let keyboardCleaningTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
+    guard let userInfo else {
+        return Unmanaged.passRetained(event)
+    }
+
+    let manager = Unmanaged<KeyboardCleaningManager>.fromOpaque(userInfo).takeUnretainedValue()
+    return manager.handleEvent(type: type, event: event)
+}
+
 @MainActor
 final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private static let keyboardCleaningAutoDisableSeconds: TimeInterval = 120.0
+
     private var settings: EngineSettings
     private var engineEnabled: Bool
+    private var keyboardCleaningEnabled = false
 
     private let engine: ScrollEngine
+    private let keyboardCleaningManager = KeyboardCleaningManager()
     private let launchAgentManager = LaunchAgentManager()
 
     private var statusItem: NSStatusItem?
     private let menu = NSMenu()
 
     private var enabledItem: NSMenuItem?
+    private var keyboardCleaningItem: NSMenuItem?
     private var saveSettingsItem: NSMenuItem?
     private var launchAtLoginItem: NSMenuItem?
+    private var keyboardCleaningAutoDisableWorkItem: DispatchWorkItem?
 
     private var speedSlider: NSSlider?
     private var pointerSpeedSlider: NSSlider?
@@ -783,6 +902,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        disableKeyboardCleaning(showTimeoutAlert: false)
         engine.stop()
     }
 
@@ -790,12 +910,34 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         launchAtLoginItem?.state = launchAgentManager.isEnabled() ? .on : .off
         saveSettingsItem?.title = "Save Settings"
         saveSettingsItem?.isEnabled = true
+        updateMenuState()
     }
 
     @objc private func toggleEngine(_ sender: NSMenuItem) {
         engineEnabled.toggle()
         SettingsStore.saveEnabled(engineEnabled)
         applyEngineEnabledState(promptForPermissions: true)
+        updateMenuState()
+    }
+
+    @objc private func toggleKeyboardCleaning(_ sender: NSMenuItem) {
+        if keyboardCleaningEnabled {
+            disableKeyboardCleaning(showTimeoutAlert: false)
+            return
+        }
+
+        guard keyboardCleaningManager.start(promptForPermissions: true) else {
+            showAlert(
+                title: "Permissions Required",
+                message: "Enable Accessibility and Input Monitoring for SmoothScroll in System Settings > Privacy & Security."
+            )
+            keyboardCleaningEnabled = false
+            updateMenuState()
+            return
+        }
+
+        keyboardCleaningEnabled = true
+        scheduleKeyboardCleaningAutoDisable()
         updateMenuState()
     }
 
@@ -881,6 +1023,14 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         enabledItem = NSMenuItem(title: "Enabled", action: #selector(toggleEngine(_:)), keyEquivalent: "")
         enabledItem?.target = self
         if let enabledItem { menu.addItem(enabledItem) }
+
+        keyboardCleaningItem = NSMenuItem(
+            title: "Enable Keyboard Cleaning",
+            action: #selector(toggleKeyboardCleaning(_:)),
+            keyEquivalent: ""
+        )
+        keyboardCleaningItem?.target = self
+        if let keyboardCleaningItem { menu.addItem(keyboardCleaningItem) }
 
         menu.addItem(.separator())
 
@@ -1063,8 +1213,44 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         SettingsStore.saveEnabled(engineEnabled)
     }
 
+    private func scheduleKeyboardCleaningAutoDisable() {
+        keyboardCleaningAutoDisableWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.disableKeyboardCleaning(showTimeoutAlert: true)
+        }
+        keyboardCleaningAutoDisableWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.keyboardCleaningAutoDisableSeconds,
+            execute: workItem
+        )
+    }
+
+    private func disableKeyboardCleaning(showTimeoutAlert: Bool) {
+        keyboardCleaningAutoDisableWorkItem?.cancel()
+        keyboardCleaningAutoDisableWorkItem = nil
+
+        guard keyboardCleaningEnabled else {
+            keyboardCleaningManager.stop()
+            return
+        }
+
+        keyboardCleaningEnabled = false
+        keyboardCleaningManager.stop()
+        updateMenuState()
+
+        if showTimeoutAlert {
+            showAlert(
+                title: "Keyboard Cleaning Ended",
+                message: "Keyboard input was automatically re-enabled after 2 minutes."
+            )
+        }
+    }
+
     private func updateMenuState() {
         enabledItem?.state = engineEnabled ? .on : .off
+        keyboardCleaningItem?.state = keyboardCleaningEnabled ? .on : .off
+        keyboardCleaningItem?.title = keyboardCleaningEnabled ? "Disable Keyboard Cleaning" : "Enable Keyboard Cleaning"
 
         speedSlider?.doubleValue = settings.speed
         pointerSpeedSlider?.doubleValue = settings.pointerSpeed
