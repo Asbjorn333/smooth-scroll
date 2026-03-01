@@ -63,7 +63,7 @@ Without these permissions, event capture cannot work.
 ## Tuning ranges
 
 - `Speed`: `1..1000`
-- `Pointer Speed`: `0.0..10.0` (applies to global + runtime HID acceleration)
+- `Pointer Speed`: `0.0..20.0` (applies to global + runtime HID acceleration)
 - `Smoothness`: `0.00..0.995`
 - `Decay`: `0.1..120.0`
 - `FPS`: `30..360`

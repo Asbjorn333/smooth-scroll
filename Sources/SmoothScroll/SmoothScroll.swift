@@ -10,7 +10,7 @@ enum TuningLimits {
     static let smoothness: ClosedRange<Double> = 0.0...0.995
     static let decay: ClosedRange<Double> = 0.1...120.0
     static let fps: ClosedRange<Double> = 30.0...360.0
-    static let pointerSpeed: ClosedRange<Double> = 0.0...10.0
+    static let pointerSpeed: ClosedRange<Double> = 0.0...20.0
 }
 
 private func clampValue(_ value: Double, to range: ClosedRange<Double>) -> Double {
@@ -162,7 +162,7 @@ enum PointerSpeedManager {
         "HIDTrackpadAcceleration"
     ]
     private static let fallbackPointerSpeed = 5.0
-    private static let systemRange: ClosedRange<Double> = 0.0...10.0
+    private static let systemRange: ClosedRange<Double> = 0.0...20.0
 
     static func currentSystemValue() -> Double {
         if let systemValue = readRuntimeSystemSpeed() {
