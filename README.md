@@ -28,6 +28,30 @@ SmoothScroll is a native macOS menu bar app that makes mouse wheel scrolling fee
 - macOS 13+
 - Swift 6 toolchain / Xcode Command Line Tools
 
+## Secret scanning (gitleaks)
+
+Install gitleaks:
+
+```bash
+brew install gitleaks
+```
+
+Enable the repository pre-commit hook:
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+After this, every commit is scanned for secrets from staged files. A commit is blocked when a potential secret is detected.
+
+Manual full-history scan:
+
+```bash
+gitleaks git --redact .
+```
+
+CI is also configured in `.github/workflows/gitleaks.yml` to run on `push` and `pull_request`.
+
 ## Quick start (recommended)
 
 Build and install a desktop app on `~/Desktop`:

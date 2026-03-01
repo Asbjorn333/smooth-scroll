@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  cat <<'EOF'
+gitleaks is required for the pre-commit secret scan.
+Install it with Homebrew:
+  brew install gitleaks
+EOF
+  exit 1
+fi
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gitleaks-staged.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+HAS_FILES=0
+while IFS= read -r -d '' FILE; do
+  HAS_FILES=1
+  TARGET="$TMP_DIR/$FILE"
+  mkdir -p "$(dirname "$TARGET")"
+  git show ":$FILE" >"$TARGET"
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [[ "$HAS_FILES" -eq 0 ]]; then
+  exit 0
+fi
+
+GITLEAKS_CMD=(gitleaks dir --redact "$TMP_DIR")
+if [[ -f "$ROOT_DIR/.gitleaks.toml" ]]; then
+  GITLEAKS_CMD=(gitleaks dir --redact --config "$ROOT_DIR/.gitleaks.toml" "$TMP_DIR")
+fi
+
+if ! "${GITLEAKS_CMD[@]}"; then
+  echo
+  echo "Commit blocked: potential secrets detected in staged changes."
+  echo "Fix or remove the secret, then stage and commit again."
+  exit 1
+fi
