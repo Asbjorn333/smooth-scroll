@@ -17,6 +17,142 @@ private func clampValue(_ value: Double, to range: ClosedRange<Double>) -> Doubl
     max(range.lowerBound, min(value, range.upperBound))
 }
 
+enum MouseButtonAction: String, CaseIterable {
+    case passthrough
+    case back
+    case forward
+    case toggleSmoothScroll
+    case keyboardKey
+
+    static let directCases: [MouseButtonAction] = [
+        .passthrough,
+        .back,
+        .forward,
+        .toggleSmoothScroll
+    ]
+
+    var title: String {
+        switch self {
+        case .passthrough:
+            return "Passthrough"
+        case .back:
+            return "Back (Cmd+[)"
+        case .forward:
+            return "Forward (Cmd+])"
+        case .toggleSmoothScroll:
+            return "Toggle SmoothScroll"
+        case .keyboardKey:
+            return "Keyboard Key"
+        }
+    }
+}
+
+enum SideMouseButton {
+    static let primary: Int64 = 3 // Often exposed as "Button 4" by gaming mice.
+    static let secondary: Int64 = 4 // Often exposed as "Button 5" by gaming mice.
+}
+
+enum SideMouseButtonSlot: Int {
+    case primary = 1
+    case secondary = 2
+
+    var title: String {
+        switch self {
+        case .primary:
+            return "Side Button 1 (Button 4)"
+        case .secondary:
+            return "Side Button 2 (Button 5)"
+        }
+    }
+}
+
+enum MouseButtonKeyboardKey: String, CaseIterable {
+    case enter
+    case tab
+    case space
+    case escape
+    case deleteBackward
+    case deleteForward
+    case upArrow
+    case downArrow
+    case leftArrow
+    case rightArrow
+    case home
+    case end
+    case pageUp
+    case pageDown
+
+    var title: String {
+        switch self {
+        case .enter:
+            return "Enter"
+        case .tab:
+            return "Tab"
+        case .space:
+            return "Space"
+        case .escape:
+            return "Escape"
+        case .deleteBackward:
+            return "Delete"
+        case .deleteForward:
+            return "Forward Delete"
+        case .upArrow:
+            return "Arrow Up"
+        case .downArrow:
+            return "Arrow Down"
+        case .leftArrow:
+            return "Arrow Left"
+        case .rightArrow:
+            return "Arrow Right"
+        case .home:
+            return "Home"
+        case .end:
+            return "End"
+        case .pageUp:
+            return "Page Up"
+        case .pageDown:
+            return "Page Down"
+        }
+    }
+
+    var keyCode: CGKeyCode {
+        switch self {
+        case .enter:
+            return 36
+        case .tab:
+            return 48
+        case .space:
+            return 49
+        case .escape:
+            return 53
+        case .deleteBackward:
+            return 51
+        case .deleteForward:
+            return 117
+        case .upArrow:
+            return 126
+        case .downArrow:
+            return 125
+        case .leftArrow:
+            return 123
+        case .rightArrow:
+            return 124
+        case .home:
+            return 115
+        case .end:
+            return 119
+        case .pageUp:
+            return 116
+        case .pageDown:
+            return 121
+        }
+    }
+
+    var flags: CGEventFlags {
+        []
+    }
+}
+
 enum PointerSpeedManager {
     private static let mouseKey = "com.apple.mouse.scaling"
     private static let trackpadKey = "com.apple.trackpad.scaling"
@@ -159,13 +295,21 @@ struct EngineSettings {
     var decay: Double
     var fps: Double
     var pointerSpeed: Double
+    var sideButtonPrimaryAction: MouseButtonAction
+    var sideButtonSecondaryAction: MouseButtonAction
+    var sideButtonPrimaryKeyboardKey: MouseButtonKeyboardKey
+    var sideButtonSecondaryKeyboardKey: MouseButtonKeyboardKey
 
     static let `default` = EngineSettings(
         speed: 100.0,
         smoothness: 0.80,
         decay: 28.0,
         fps: 120.0,
-        pointerSpeed: PointerSpeedManager.currentSystemValue()
+        pointerSpeed: PointerSpeedManager.currentSystemValue(),
+        sideButtonPrimaryAction: .back,
+        sideButtonSecondaryAction: .forward,
+        sideButtonPrimaryKeyboardKey: .enter,
+        sideButtonSecondaryKeyboardKey: .enter
     )
 
     var clamped: EngineSettings {
@@ -174,8 +318,23 @@ struct EngineSettings {
             smoothness: clampValue(smoothness, to: TuningLimits.smoothness),
             decay: clampValue(decay, to: TuningLimits.decay),
             fps: clampValue(fps, to: TuningLimits.fps),
-            pointerSpeed: clampValue(pointerSpeed, to: TuningLimits.pointerSpeed)
+            pointerSpeed: clampValue(pointerSpeed, to: TuningLimits.pointerSpeed),
+            sideButtonPrimaryAction: sideButtonPrimaryAction,
+            sideButtonSecondaryAction: sideButtonSecondaryAction,
+            sideButtonPrimaryKeyboardKey: sideButtonPrimaryKeyboardKey,
+            sideButtonSecondaryKeyboardKey: sideButtonSecondaryKeyboardKey
         )
+    }
+
+    func mapping(forMouseButtonNumber buttonNumber: Int64) -> (action: MouseButtonAction, keyboardKey: MouseButtonKeyboardKey) {
+        switch buttonNumber {
+        case SideMouseButton.primary:
+            return (sideButtonPrimaryAction, sideButtonPrimaryKeyboardKey)
+        case SideMouseButton.secondary:
+            return (sideButtonSecondaryAction, sideButtonSecondaryKeyboardKey)
+        default:
+            return (.passthrough, .enter)
+        }
     }
 }
 
@@ -275,8 +434,12 @@ enum SettingsStore {
     private static let keyDecay = "smoothscroll.decay"
     private static let keyFPS = "smoothscroll.fps"
     private static let keyPointerSpeed = "smoothscroll.pointerSpeed"
+    private static let keySideButtonPrimaryAction = "smoothscroll.sideButtonPrimaryAction"
+    private static let keySideButtonSecondaryAction = "smoothscroll.sideButtonSecondaryAction"
+    private static let keySideButtonPrimaryKeyboardKey = "smoothscroll.sideButtonPrimaryKeyboardKey"
+    private static let keySideButtonSecondaryKeyboardKey = "smoothscroll.sideButtonSecondaryKeyboardKey"
     private static let keyDefaultsVersion = "smoothscroll.defaultsVersion"
-    private static let currentDefaultsVersion = 3
+    private static let currentDefaultsVersion = 5
 
     static func loadSettings() -> EngineSettings {
         let defaults = UserDefaults.standard
@@ -287,13 +450,29 @@ enum SettingsStore {
         let decay = defaults.object(forKey: keyDecay) as? Double ?? EngineSettings.default.decay
         let fps = defaults.object(forKey: keyFPS) as? Double ?? EngineSettings.default.fps
         let pointerSpeed = defaults.object(forKey: keyPointerSpeed) as? Double ?? PointerSpeedManager.currentSystemValue()
+        let sideButtonPrimaryAction = MouseButtonAction(
+            rawValue: defaults.string(forKey: keySideButtonPrimaryAction) ?? ""
+        ) ?? EngineSettings.default.sideButtonPrimaryAction
+        let sideButtonSecondaryAction = MouseButtonAction(
+            rawValue: defaults.string(forKey: keySideButtonSecondaryAction) ?? ""
+        ) ?? EngineSettings.default.sideButtonSecondaryAction
+        let sideButtonPrimaryKeyboardKey = MouseButtonKeyboardKey(
+            rawValue: defaults.string(forKey: keySideButtonPrimaryKeyboardKey) ?? ""
+        ) ?? EngineSettings.default.sideButtonPrimaryKeyboardKey
+        let sideButtonSecondaryKeyboardKey = MouseButtonKeyboardKey(
+            rawValue: defaults.string(forKey: keySideButtonSecondaryKeyboardKey) ?? ""
+        ) ?? EngineSettings.default.sideButtonSecondaryKeyboardKey
 
         return EngineSettings(
             speed: speed,
             smoothness: smoothness,
             decay: decay,
             fps: fps,
-            pointerSpeed: pointerSpeed
+            pointerSpeed: pointerSpeed,
+            sideButtonPrimaryAction: sideButtonPrimaryAction,
+            sideButtonSecondaryAction: sideButtonSecondaryAction,
+            sideButtonPrimaryKeyboardKey: sideButtonPrimaryKeyboardKey,
+            sideButtonSecondaryKeyboardKey: sideButtonSecondaryKeyboardKey
         ).clamped
     }
 
@@ -305,6 +484,10 @@ enum SettingsStore {
         defaults.set(clamped.decay, forKey: keyDecay)
         defaults.set(clamped.fps, forKey: keyFPS)
         defaults.set(clamped.pointerSpeed, forKey: keyPointerSpeed)
+        defaults.set(clamped.sideButtonPrimaryAction.rawValue, forKey: keySideButtonPrimaryAction)
+        defaults.set(clamped.sideButtonSecondaryAction.rawValue, forKey: keySideButtonSecondaryAction)
+        defaults.set(clamped.sideButtonPrimaryKeyboardKey.rawValue, forKey: keySideButtonPrimaryKeyboardKey)
+        defaults.set(clamped.sideButtonSecondaryKeyboardKey.rawValue, forKey: keySideButtonSecondaryKeyboardKey)
     }
 
     static func loadEnabled() -> Bool {
@@ -328,7 +511,11 @@ enum SettingsStore {
             defaults.object(forKey: keySmoothness) != nil ||
             defaults.object(forKey: keyDecay) != nil ||
             defaults.object(forKey: keyFPS) != nil ||
-            defaults.object(forKey: keyPointerSpeed) != nil
+            defaults.object(forKey: keyPointerSpeed) != nil ||
+            defaults.object(forKey: keySideButtonPrimaryAction) != nil ||
+            defaults.object(forKey: keySideButtonSecondaryAction) != nil ||
+            defaults.object(forKey: keySideButtonPrimaryKeyboardKey) != nil ||
+            defaults.object(forKey: keySideButtonSecondaryKeyboardKey) != nil
 
         if !hadAnySavedValues || hasLegacyDefaultValues(defaults) {
             defaults.set(EngineSettings.default.speed, forKey: keySpeed)
@@ -336,6 +523,10 @@ enum SettingsStore {
             defaults.set(EngineSettings.default.decay, forKey: keyDecay)
             defaults.set(EngineSettings.default.fps, forKey: keyFPS)
             defaults.set(EngineSettings.default.pointerSpeed, forKey: keyPointerSpeed)
+            defaults.set(EngineSettings.default.sideButtonPrimaryAction.rawValue, forKey: keySideButtonPrimaryAction)
+            defaults.set(EngineSettings.default.sideButtonSecondaryAction.rawValue, forKey: keySideButtonSecondaryAction)
+            defaults.set(EngineSettings.default.sideButtonPrimaryKeyboardKey.rawValue, forKey: keySideButtonPrimaryKeyboardKey)
+            defaults.set(EngineSettings.default.sideButtonSecondaryKeyboardKey.rawValue, forKey: keySideButtonSecondaryKeyboardKey)
         }
 
         defaults.set(currentDefaultsVersion, forKey: keyDefaultsVersion)
@@ -347,7 +538,11 @@ enum SettingsStore {
             smoothness: 0.75,
             decay: 12.0,
             fps: 120.0,
-            pointerSpeed: PointerSpeedManager.currentSystemValue()
+            pointerSpeed: PointerSpeedManager.currentSystemValue(),
+            sideButtonPrimaryAction: .back,
+            sideButtonSecondaryAction: .forward,
+            sideButtonPrimaryKeyboardKey: .enter,
+            sideButtonSecondaryKeyboardKey: .enter
         )
 
         let speed = defaults.object(forKey: keySpeed) as? Double ?? legacy.speed
@@ -562,6 +757,7 @@ final class ScrollEngine {
     private var settings: EngineSettings
     private var enabled: Bool = true
     private var running = false
+    var onToggleEnabledRequested: (() -> Void)?
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -689,7 +885,10 @@ final class ScrollEngine {
     }
 
     private func setupEventTap() -> Bool {
-        let mask = CGEventMask(1 << CGEventType.scrollWheel.rawValue)
+        let scrollMask = CGEventMask(1 << CGEventType.scrollWheel.rawValue)
+        let otherMouseDownMask = CGEventMask(1 << CGEventType.otherMouseDown.rawValue)
+        let otherMouseUpMask = CGEventMask(1 << CGEventType.otherMouseUp.rawValue)
+        let mask = scrollMask | otherMouseDownMask | otherMouseUpMask
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -721,6 +920,13 @@ final class ScrollEngine {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
             return Unmanaged.passRetained(event)
+        }
+
+        if type == .otherMouseDown || type == .otherMouseUp {
+            lock.lock()
+            let localSettings = settings
+            lock.unlock()
+            return handleMappedMouseButtonEvent(type: type, event: event, settings: localSettings)
         }
 
         if type != .scrollWheel {
@@ -763,6 +969,53 @@ final class ScrollEngine {
         lock.unlock()
 
         return nil
+    }
+
+    private func handleMappedMouseButtonEvent(
+        type: CGEventType,
+        event: CGEvent,
+        settings: EngineSettings
+    ) -> Unmanaged<CGEvent>? {
+        let buttonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
+        let mapping = settings.mapping(forMouseButtonNumber: buttonNumber)
+        let action = mapping.action
+
+        guard action != .passthrough else {
+            return Unmanaged.passRetained(event)
+        }
+
+        if type == .otherMouseDown {
+            triggerMouseButtonAction(action, keyboardKey: mapping.keyboardKey)
+        }
+
+        return nil
+    }
+
+    private func triggerMouseButtonAction(_ action: MouseButtonAction, keyboardKey: MouseButtonKeyboardKey) {
+        switch action {
+        case .passthrough:
+            break
+        case .back:
+            postKeyboardShortcut(keyCode: 33, flags: .maskCommand)
+        case .forward:
+            postKeyboardShortcut(keyCode: 30, flags: .maskCommand)
+        case .toggleSmoothScroll:
+            onToggleEnabledRequested?()
+        case .keyboardKey:
+            postKeyboardShortcut(keyCode: keyboardKey.keyCode, flags: keyboardKey.flags)
+        }
+    }
+
+    private func postKeyboardShortcut(keyCode: CGKeyCode, flags: CGEventFlags = []) {
+        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
+            return
+        }
+
+        keyDown.flags = flags
+        keyUp.flags = flags
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
     }
 
     private func tick() {
@@ -879,6 +1132,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var smoothnessSlider: NSSlider?
     private var decaySlider: NSSlider?
     private var fpsSlider: NSSlider?
+    private var sideButtonPrimaryItem: NSMenuItem?
+    private var sideButtonSecondaryItem: NSMenuItem?
 
     private var speedLabel: NSTextField?
     private var pointerSpeedLabel: NSTextField?
@@ -891,6 +1146,9 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.engineEnabled = enabled
         self.engine = ScrollEngine(settings: settings)
         super.init()
+        self.engine.onToggleEnabledRequested = { [weak self] in
+            self?.toggleEngineFromMouseButton()
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -989,6 +1247,32 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         saveAndApplySettings()
     }
 
+    @objc private func sideButtonActionChanged(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? String,
+              let slot = SideMouseButtonSlot(rawValue: sender.tag) else {
+            return
+        }
+
+        if payload.hasPrefix("action:") {
+            let rawValue = String(payload.dropFirst("action:".count))
+            guard let action = MouseButtonAction(rawValue: rawValue) else {
+                return
+            }
+            setSideButtonAction(action, for: slot)
+        } else if payload.hasPrefix("key:") {
+            let rawValue = String(payload.dropFirst("key:".count))
+            guard let keyboardKey = MouseButtonKeyboardKey(rawValue: rawValue) else {
+                return
+            }
+            setSideButtonKeyboardKey(keyboardKey, for: slot)
+            setSideButtonAction(.keyboardKey, for: slot)
+        } else {
+            return
+        }
+
+        saveAndApplySettings()
+    }
+
     @objc private func saveSettingsNow(_ sender: NSMenuItem) {
         persistSettings()
         sender.title = "Saved ✓"
@@ -1031,6 +1315,28 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         keyboardCleaningItem?.target = self
         if let keyboardCleaningItem { menu.addItem(keyboardCleaningItem) }
+
+        menu.addItem(.separator())
+
+        let mouseButtonsHeader = NSMenuItem(title: "Mouse Buttons", action: nil, keyEquivalent: "")
+        mouseButtonsHeader.isEnabled = false
+        menu.addItem(mouseButtonsHeader)
+
+        let sideButtonPrimaryItem = makeMouseButtonMappingMenuItem(
+            slot: .primary,
+            action: settings.sideButtonPrimaryAction,
+            keyboardKey: settings.sideButtonPrimaryKeyboardKey
+        )
+        self.sideButtonPrimaryItem = sideButtonPrimaryItem
+        menu.addItem(sideButtonPrimaryItem)
+
+        let sideButtonSecondaryItem = makeMouseButtonMappingMenuItem(
+            slot: .secondary,
+            action: settings.sideButtonSecondaryAction,
+            keyboardKey: settings.sideButtonSecondaryKeyboardKey
+        )
+        self.sideButtonSecondaryItem = sideButtonSecondaryItem
+        menu.addItem(sideButtonSecondaryItem)
 
         menu.addItem(.separator())
 
@@ -1173,6 +1479,53 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return (item, slider, valueLabel)
     }
 
+    private func makeMouseButtonMappingMenuItem(
+        slot: SideMouseButtonSlot,
+        action: MouseButtonAction,
+        keyboardKey: MouseButtonKeyboardKey
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: slot.title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: slot.title)
+        submenu.autoenablesItems = false
+
+        for mapping in MouseButtonAction.directCases {
+            let mappingItem = NSMenuItem(
+                title: mapping.title,
+                action: #selector(sideButtonActionChanged(_:)),
+                keyEquivalent: ""
+            )
+            mappingItem.target = self
+            mappingItem.tag = slot.rawValue
+            mappingItem.representedObject = "action:\(mapping.rawValue)"
+            mappingItem.state = mapping == action ? .on : .off
+            submenu.addItem(mappingItem)
+        }
+
+        submenu.addItem(.separator())
+
+        let keyboardKeyItem = NSMenuItem(title: "Keyboard Key", action: nil, keyEquivalent: "")
+        let keyboardKeyMenu = NSMenu(title: "Keyboard Key")
+        keyboardKeyMenu.autoenablesItems = false
+        for key in MouseButtonKeyboardKey.allCases {
+            let keyItem = NSMenuItem(
+                title: key.title,
+                action: #selector(sideButtonActionChanged(_:)),
+                keyEquivalent: ""
+            )
+            keyItem.target = self
+            keyItem.tag = slot.rawValue
+            keyItem.representedObject = "key:\(key.rawValue)"
+            keyItem.state = action == .keyboardKey && key == keyboardKey ? .on : .off
+            keyboardKeyMenu.addItem(keyItem)
+        }
+        keyboardKeyItem.submenu = keyboardKeyMenu
+        keyboardKeyItem.state = action == .keyboardKey ? .on : .off
+        submenu.addItem(keyboardKeyItem)
+
+        item.submenu = submenu
+        return item
+    }
+
     private func applyEngineEnabledState(promptForPermissions: Bool) {
         if engineEnabled {
             if !engine.isRunning() {
@@ -1195,6 +1548,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func toggleEngineFromMouseButton() {
+        engineEnabled.toggle()
+        SettingsStore.saveEnabled(engineEnabled)
+        applyEngineEnabledState(promptForPermissions: false)
+        updateMenuState()
+    }
+
     private func saveAndApplySettings() {
         settings = settings.clamped
         persistSettings()
@@ -1211,6 +1571,71 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings = settings.clamped
         SettingsStore.saveSettings(settings)
         SettingsStore.saveEnabled(engineEnabled)
+    }
+
+    private func setSideButtonAction(_ action: MouseButtonAction, for slot: SideMouseButtonSlot) {
+        switch slot {
+        case .primary:
+            settings.sideButtonPrimaryAction = action
+        case .secondary:
+            settings.sideButtonSecondaryAction = action
+        }
+    }
+
+    private func setSideButtonKeyboardKey(_ key: MouseButtonKeyboardKey, for slot: SideMouseButtonSlot) {
+        switch slot {
+        case .primary:
+            settings.sideButtonPrimaryKeyboardKey = key
+        case .secondary:
+            settings.sideButtonSecondaryKeyboardKey = key
+        }
+    }
+
+    private func updateMouseButtonMenuStates() {
+        updateMouseButtonMenuState(
+            sideButtonPrimaryItem?.submenu,
+            selectedAction: settings.sideButtonPrimaryAction,
+            selectedKeyboardKey: settings.sideButtonPrimaryKeyboardKey
+        )
+        updateMouseButtonMenuState(
+            sideButtonSecondaryItem?.submenu,
+            selectedAction: settings.sideButtonSecondaryAction,
+            selectedKeyboardKey: settings.sideButtonSecondaryKeyboardKey
+        )
+    }
+
+    private func updateMouseButtonMenuState(
+        _ submenu: NSMenu?,
+        selectedAction: MouseButtonAction,
+        selectedKeyboardKey: MouseButtonKeyboardKey
+    ) {
+        guard let submenu else {
+            return
+        }
+
+        for item in submenu.items {
+            if let payload = item.representedObject as? String,
+               payload.hasPrefix("action:") {
+                let rawValue = String(payload.dropFirst("action:".count))
+                let isSelected = rawValue == selectedAction.rawValue
+                item.state = isSelected ? .on : .off
+            }
+
+            if let keySubmenu = item.submenu {
+                item.state = selectedAction == .keyboardKey ? .on : .off
+                for keyItem in keySubmenu.items {
+                    guard let payload = keyItem.representedObject as? String,
+                          payload.hasPrefix("key:") else {
+                        continue
+                    }
+
+                    let rawValue = String(payload.dropFirst("key:".count))
+                    let isSelected = selectedAction == .keyboardKey &&
+                        rawValue == selectedKeyboardKey.rawValue
+                    keyItem.state = isSelected ? .on : .off
+                }
+            }
+        }
     }
 
     private func scheduleKeyboardCleaningAutoDisable() {
@@ -1257,6 +1682,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         smoothnessSlider?.doubleValue = settings.smoothness
         decaySlider?.doubleValue = settings.decay
         fpsSlider?.doubleValue = settings.fps
+        updateMouseButtonMenuStates()
 
         speedLabel?.stringValue = String(format: "%.0f", settings.speed)
         pointerSpeedLabel?.stringValue = String(format: "%.1f", settings.pointerSpeed)
