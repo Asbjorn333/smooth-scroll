@@ -14,6 +14,7 @@ SmoothScroll is a native macOS menu bar app that makes mouse wheel scrolling fee
 
 - Menu bar app with icon
 - `Enabled` toggle
+- `Window Switcher (Cmd+Tab)` toggle for per-window switching
 - `Keyboard Cleaning` mode toggle
 - `Mouse Buttons` section with side-button mapping
 - Live tuning sliders for `Speed`, `Pointer Speed`, `Smoothness`, `Decay`, and `FPS`
@@ -74,6 +75,7 @@ Without these permissions, event capture cannot work.
 ## Menu controls
 
 - `Enabled`: turns smoothing on/off
+- `Window Switcher (Cmd+Tab)`: replaces native app switching with visible window switching, including multiple windows from the same app
 - `Enable Keyboard Cleaning`: blocks keyboard input globally so you can clean the keyboard safely with mouse/trackpad still active; auto-disables after 2 minutes
 - `Mouse Buttons`: map side buttons (`Button 4`/`Button 5`) to `Passthrough`, `Back`, `Forward`, `Toggle SmoothScroll`, or keyboard keys (for example `Enter`)
 - `Speed`: stronger scroll output per wheel notch
@@ -184,6 +186,11 @@ No scrolling effect:
 
 - Confirm Accessibility + Input Monitoring are granted
 - Quit and relaunch the app after granting permissions
+
+`Cmd+Tab` still switches apps instead of windows:
+
+- Confirm `Window Switcher (Cmd+Tab)` is enabled in the menu
+- Quit and relaunch the app after granting Accessibility and Input Monitoring
 
 Finder still shows an old app icon:
 

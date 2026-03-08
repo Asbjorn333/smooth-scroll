@@ -1,6 +1,6 @@
-import AppKit
-import ApplicationServices
-import CoreGraphics
+@preconcurrency import AppKit
+@preconcurrency import ApplicationServices
+@preconcurrency import CoreGraphics
 import Foundation
 import IOKit
 import IOKit.hidsystem
@@ -15,6 +15,21 @@ enum TuningLimits {
 
 private func clampValue(_ value: Double, to range: ClosedRange<Double>) -> Double {
     max(range.lowerBound, min(value, range.upperBound))
+}
+
+private func aspectFitSize(_ size: NSSize, within maxSize: NSSize) -> NSSize {
+    guard size.width > 0, size.height > 0 else {
+        return maxSize
+    }
+
+    let widthScale = maxSize.width / size.width
+    let heightScale = maxSize.height / size.height
+    let scale = min(widthScale, heightScale, 1.0)
+
+    return NSSize(
+        width: max(1, floor(size.width * scale)),
+        height: max(1, floor(size.height * scale))
+    )
 }
 
 enum MouseButtonAction: String, CaseIterable {
@@ -151,6 +166,11 @@ enum MouseButtonKeyboardKey: String, CaseIterable {
     var flags: CGEventFlags {
         []
     }
+}
+
+enum KeyboardKeyCode {
+    static let tab: CGKeyCode = 48
+    static let escape: CGKeyCode = 53
 }
 
 enum PointerSpeedManager {
@@ -429,6 +449,7 @@ struct CLIOptions {
 
 enum SettingsStore {
     private static let keyEnabled = "smoothscroll.enabled"
+    private static let keyWindowSwitcherEnabled = "smoothscroll.windowSwitcherEnabled"
     private static let keySpeed = "smoothscroll.speed"
     private static let keySmoothness = "smoothscroll.smoothness"
     private static let keyDecay = "smoothscroll.decay"
@@ -499,6 +520,17 @@ enum SettingsStore {
 
     static func saveEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: keyEnabled)
+    }
+
+    static func loadWindowSwitcherEnabled() -> Bool {
+        if UserDefaults.standard.object(forKey: keyWindowSwitcherEnabled) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: keyWindowSwitcherEnabled)
+    }
+
+    static func saveWindowSwitcherEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: keyWindowSwitcherEnabled)
     }
 
     private static func migrateDefaultsIfNeeded(_ defaults: UserDefaults) {
@@ -642,6 +674,808 @@ final class LaunchAgentManager {
         } catch {
             return -1
         }
+    }
+}
+
+struct WindowSwitchTarget {
+    let windowID: CGWindowID
+    let processID: pid_t
+    let appName: String
+    let windowTitle: String
+
+    var displayTitle: String {
+        windowTitle.isEmpty ? appName : windowTitle
+    }
+
+    var detailTitle: String {
+        windowTitle.isEmpty ? "Application Window" : appName
+    }
+}
+
+struct WindowSwitchItem {
+    let target: WindowSwitchTarget
+    let appIcon: NSImage?
+    let previewImage: NSImage?
+}
+
+enum WindowCatalog {
+    private static let minimumWidth = 120.0
+    private static let minimumHeight = 80.0
+    private static let ignoredOwnerNames: Set<String> = ["Window Server", "Dock"]
+
+    static func visibleWindows(
+        excludingProcessID processID: pid_t = ProcessInfo.processInfo.processIdentifier
+    ) -> [WindowSwitchTarget] {
+        guard let windowInfoList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return []
+        }
+
+        var seenWindowIDs = Set<CGWindowID>()
+        var windows: [WindowSwitchTarget] = []
+
+        for windowInfo in windowInfoList {
+            guard let ownerPID = (windowInfo[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value else {
+                continue
+            }
+
+            guard ownerPID != processID else {
+                continue
+            }
+
+            let ownerName = (windowInfo[kCGWindowOwnerName as String] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !ownerName.isEmpty, !ignoredOwnerNames.contains(ownerName) else {
+                continue
+            }
+
+            let layer = (windowInfo[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+            guard layer == 0 else {
+                continue
+            }
+
+            let alpha = (windowInfo[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1.0
+            guard alpha > 0.01 else {
+                continue
+            }
+
+            guard let windowIDValue = (windowInfo[kCGWindowNumber as String] as? NSNumber)?.uint32Value else {
+                continue
+            }
+
+            let bounds = windowInfo[kCGWindowBounds as String] as? [String: Any]
+            let width = (bounds?["Width"] as? NSNumber)?.doubleValue ?? 0
+            let height = (bounds?["Height"] as? NSNumber)?.doubleValue ?? 0
+            guard width >= minimumWidth, height >= minimumHeight else {
+                continue
+            }
+
+            let windowID = CGWindowID(windowIDValue)
+            guard seenWindowIDs.insert(windowID).inserted else {
+                continue
+            }
+
+            let title = (windowInfo[kCGWindowName as String] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            windows.append(
+                WindowSwitchTarget(
+                    windowID: windowID,
+                    processID: ownerPID,
+                    appName: ownerName,
+                    windowTitle: title
+                )
+            )
+        }
+
+        return windows
+    }
+}
+
+enum WindowActivator {
+    @discardableResult
+    static func activate(_ target: WindowSwitchTarget) -> Bool {
+        let runningApplication = NSRunningApplication(processIdentifier: target.processID)
+        runningApplication?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+
+        let applicationElement = AXUIElementCreateApplication(target.processID)
+        let windows = copyWindowElements(from: applicationElement)
+
+        if let matchingWindow = windows.first(where: { windowNumber(for: $0) == target.windowID }) {
+            focus(window: matchingWindow, in: applicationElement)
+            return true
+        }
+
+        if !target.windowTitle.isEmpty,
+           let titleMatch = windows.first(where: { title(for: $0) == target.windowTitle }) {
+            focus(window: titleMatch, in: applicationElement)
+            return true
+        }
+
+        return runningApplication != nil
+    }
+
+    private static func copyWindowElements(from applicationElement: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXWindowsAttribute as CFString,
+            &value
+        ) == .success,
+        let windows = value as? [AXUIElement] else {
+            return []
+        }
+
+        return windows
+    }
+
+    private static func windowNumber(for window: AXUIElement) -> CGWindowID? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, "AXWindowNumber" as CFString, &value) == .success,
+              let number = value as? NSNumber else {
+            return nil
+        }
+
+        return CGWindowID(number.uint32Value)
+    }
+
+    private static func title(for window: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &value) == .success,
+              let title = value as? String else {
+            return nil
+        }
+
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func focus(window: AXUIElement, in applicationElement: AXUIElement) {
+        _ = AXUIElementSetAttributeValue(
+            applicationElement,
+            kAXFrontmostAttribute as CFString,
+            kCFBooleanTrue
+        )
+        _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    }
+}
+
+enum WindowSnapshotProvider {
+    private static let maximumPreviewSize = NSSize(width: 220, height: 140)
+
+    static func makeItem(for target: WindowSwitchTarget) -> WindowSwitchItem {
+        let appIcon = NSRunningApplication(processIdentifier: target.processID)?.icon
+        return WindowSwitchItem(
+            target: target,
+            appIcon: appIcon,
+            previewImage: capturePreview(for: target)
+        )
+    }
+
+    private static func capturePreview(for target: WindowSwitchTarget) -> NSImage? {
+        guard let cgImage = CGWindowListCreateImage(
+            .null,
+            .optionIncludingWindow,
+            target.windowID,
+            [.boundsIgnoreFraming, .bestResolution]
+        ) else {
+            return nil
+        }
+
+        let originalSize = NSSize(width: cgImage.width, height: cgImage.height)
+        let fittedSize = aspectFitSize(originalSize, within: maximumPreviewSize)
+        let sourceImage = NSImage(cgImage: cgImage, size: originalSize)
+        let image = NSImage(size: fittedSize)
+
+        image.lockFocus()
+        if let context = NSGraphicsContext.current {
+            context.imageInterpolation = .high
+        }
+        sourceImage.draw(
+            in: NSRect(origin: .zero, size: fittedSize),
+            from: NSRect(origin: .zero, size: originalSize),
+            operation: .copy,
+            fraction: 1
+        )
+        image.unlockFocus()
+
+        return image
+    }
+}
+
+private final class WindowSwitcherPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+@MainActor
+private final class WindowSwitcherBlockerView: NSView {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {}
+    override func rightMouseDown(with event: NSEvent) {}
+    override func otherMouseDown(with event: NSEvent) {}
+}
+
+@MainActor
+private final class WindowSwitcherCardView: NSView {
+    private let item: WindowSwitchItem
+    private let previewContainer = NSView()
+    private let previewImageView = NSImageView()
+    private let placeholderIconView = NSImageView()
+    private let badgeBackgroundView = NSView()
+    private let badgeIconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+
+    private var widthConstraint: NSLayoutConstraint?
+    private var heightConstraint: NSLayoutConstraint?
+    private var previewHeightConstraint: NSLayoutConstraint?
+    var onClick: (() -> Void)?
+
+    init(item: WindowSwitchItem) {
+        self.item = item
+        super.init(frame: .zero)
+        configure()
+        render()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+
+    func updateCardSize(width: CGFloat) {
+        widthConstraint?.constant = width
+        previewHeightConstraint?.constant = max(74, min(108, width * 0.64))
+    }
+
+    func setSelected(_ selected: Bool) {
+        layer?.backgroundColor = (
+            selected
+                ? NSColor.white.withAlphaComponent(0.16)
+                : NSColor.white.withAlphaComponent(0.05)
+        ).cgColor
+        layer?.borderColor = (
+            selected
+                ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.95)
+                : NSColor.white.withAlphaComponent(0.08)
+        ).cgColor
+        layer?.borderWidth = selected ? 2 : 1
+        alphaValue = selected ? 1.0 : 0.78
+        titleLabel.textColor = selected ? .labelColor : .secondaryLabelColor
+    }
+
+    private func configure() {
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 18
+        layer?.masksToBounds = true
+
+        previewContainer.translatesAutoresizingMaskIntoConstraints = false
+        previewContainer.wantsLayer = true
+        previewContainer.layer?.cornerRadius = 13
+        previewContainer.layer?.masksToBounds = true
+        previewContainer.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
+
+        previewImageView.translatesAutoresizingMaskIntoConstraints = false
+        previewImageView.imageScaling = .scaleProportionallyUpOrDown
+
+        placeholderIconView.translatesAutoresizingMaskIntoConstraints = false
+        placeholderIconView.imageScaling = .scaleProportionallyUpOrDown
+
+        badgeBackgroundView.translatesAutoresizingMaskIntoConstraints = false
+        badgeBackgroundView.wantsLayer = true
+        badgeBackgroundView.layer?.cornerRadius = 12
+        badgeBackgroundView.layer?.masksToBounds = true
+        badgeBackgroundView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.62).cgColor
+
+        badgeIconView.translatesAutoresizingMaskIntoConstraints = false
+        badgeIconView.imageScaling = .scaleProportionallyUpOrDown
+
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.alignment = .center
+        titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        titleLabel.lineBreakMode = .byTruncatingTail
+
+        addSubview(previewContainer)
+        previewContainer.addSubview(previewImageView)
+        previewContainer.addSubview(placeholderIconView)
+        previewContainer.addSubview(badgeBackgroundView)
+        badgeBackgroundView.addSubview(badgeIconView)
+        addSubview(titleLabel)
+
+        widthConstraint = widthAnchor.constraint(equalToConstant: 156)
+        heightConstraint = heightAnchor.constraint(equalToConstant: 146)
+        previewHeightConstraint = previewContainer.heightAnchor.constraint(equalToConstant: 96)
+
+        NSLayoutConstraint.activate([
+            widthConstraint,
+            heightConstraint,
+            previewHeightConstraint
+        ].compactMap { $0 } + [
+            previewContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            previewContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            previewContainer.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+
+            previewImageView.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor),
+            previewImageView.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor),
+            previewImageView.topAnchor.constraint(equalTo: previewContainer.topAnchor),
+            previewImageView.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor),
+
+            placeholderIconView.centerXAnchor.constraint(equalTo: previewContainer.centerXAnchor),
+            placeholderIconView.centerYAnchor.constraint(equalTo: previewContainer.centerYAnchor),
+            placeholderIconView.widthAnchor.constraint(equalToConstant: 40),
+            placeholderIconView.heightAnchor.constraint(equalToConstant: 40),
+
+            badgeBackgroundView.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor, constant: 8),
+            badgeBackgroundView.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor, constant: -8),
+            badgeBackgroundView.widthAnchor.constraint(equalToConstant: 24),
+            badgeBackgroundView.heightAnchor.constraint(equalToConstant: 24),
+
+            badgeIconView.centerXAnchor.constraint(equalTo: badgeBackgroundView.centerXAnchor),
+            badgeIconView.centerYAnchor.constraint(equalTo: badgeBackgroundView.centerYAnchor),
+            badgeIconView.widthAnchor.constraint(equalToConstant: 16),
+            badgeIconView.heightAnchor.constraint(equalToConstant: 16),
+
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            titleLabel.topAnchor.constraint(equalTo: previewContainer.bottomAnchor, constant: 8),
+            titleLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10)
+        ])
+    }
+
+    private func render() {
+        titleLabel.stringValue = item.target.displayTitle
+        previewImageView.image = item.previewImage
+        previewImageView.isHidden = item.previewImage == nil
+
+        placeholderIconView.image = item.appIcon
+        placeholderIconView.isHidden = item.previewImage != nil
+
+        badgeIconView.image = item.appIcon
+        badgeBackgroundView.isHidden = item.appIcon == nil || item.previewImage == nil
+    }
+}
+
+@MainActor
+final class WindowSwitcherOverlayController {
+    private let panel: WindowSwitcherPanel
+    private let blockerView = WindowSwitcherBlockerView()
+    private let backdropView = NSView()
+    private let chromeView = NSVisualEffectView()
+    private let contentContainer = NSView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let detailLabel = NSTextField(labelWithString: "")
+    private let rowStackView = NSStackView()
+    private var cardViews: [WindowSwitcherCardView] = []
+    private var currentWindowIDs: [CGWindowID] = []
+    private var containerWidthConstraint: NSLayoutConstraint?
+    private var containerHeightConstraint: NSLayoutConstraint?
+    var onItemActivated: ((Int) -> Void)?
+
+    init() {
+        panel = WindowSwitcherPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 720),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+
+        configurePanel()
+    }
+
+    func show(session: WindowSwitchSession) {
+        fitPanelToScreen()
+        rebuildCardsIfNeeded(items: session.items)
+        updateCardLayout(for: session.items.count)
+        updateSelectionState(for: session)
+        panel.orderFrontRegardless()
+    }
+
+    func hide() {
+        panel.orderOut(nil)
+    }
+
+    private func configurePanel() {
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = false
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .transient]
+        panel.animationBehavior = .utilityWindow
+
+        blockerView.translatesAutoresizingMaskIntoConstraints = false
+
+        backdropView.translatesAutoresizingMaskIntoConstraints = false
+        backdropView.wantsLayer = true
+        backdropView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.14).cgColor
+
+        chromeView.translatesAutoresizingMaskIntoConstraints = false
+        chromeView.material = .hudWindow
+        chromeView.blendingMode = .withinWindow
+        chromeView.state = .active
+        chromeView.wantsLayer = true
+        chromeView.layer?.cornerRadius = 26
+        chromeView.layer?.masksToBounds = true
+        chromeView.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        chromeView.layer?.borderWidth = 1
+
+        contentContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.alignment = .center
+        titleLabel.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+
+        detailLabel.translatesAutoresizingMaskIntoConstraints = false
+        detailLabel.alignment = .center
+        detailLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.lineBreakMode = .byTruncatingTail
+
+        rowStackView.translatesAutoresizingMaskIntoConstraints = false
+        rowStackView.orientation = .horizontal
+        rowStackView.alignment = .top
+        rowStackView.distribution = .fill
+        rowStackView.spacing = 12
+
+        blockerView.addSubview(backdropView)
+        blockerView.addSubview(chromeView)
+        chromeView.addSubview(contentContainer)
+        contentContainer.addSubview(rowStackView)
+        contentContainer.addSubview(titleLabel)
+        contentContainer.addSubview(detailLabel)
+        panel.contentView = blockerView
+
+        containerWidthConstraint = contentContainer.widthAnchor.constraint(equalToConstant: 760)
+        containerHeightConstraint = contentContainer.heightAnchor.constraint(equalToConstant: 246)
+
+        NSLayoutConstraint.activate([
+            backdropView.leadingAnchor.constraint(equalTo: blockerView.leadingAnchor),
+            backdropView.trailingAnchor.constraint(equalTo: blockerView.trailingAnchor),
+            backdropView.topAnchor.constraint(equalTo: blockerView.topAnchor),
+            backdropView.bottomAnchor.constraint(equalTo: blockerView.bottomAnchor),
+
+            chromeView.centerXAnchor.constraint(equalTo: blockerView.centerXAnchor),
+            chromeView.centerYAnchor.constraint(equalTo: blockerView.centerYAnchor),
+
+            contentContainer.leadingAnchor.constraint(equalTo: chromeView.leadingAnchor),
+            contentContainer.trailingAnchor.constraint(equalTo: chromeView.trailingAnchor),
+            contentContainer.topAnchor.constraint(equalTo: chromeView.topAnchor),
+            contentContainer.bottomAnchor.constraint(equalTo: chromeView.bottomAnchor),
+
+            rowStackView.leadingAnchor.constraint(greaterThanOrEqualTo: contentContainer.leadingAnchor, constant: 24),
+            rowStackView.trailingAnchor.constraint(lessThanOrEqualTo: contentContainer.trailingAnchor, constant: -24),
+            rowStackView.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: 24),
+            rowStackView.centerXAnchor.constraint(equalTo: contentContainer.centerXAnchor),
+
+            titleLabel.topAnchor.constraint(equalTo: rowStackView.bottomAnchor, constant: 16),
+            titleLabel.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor, constant: 20),
+            titleLabel.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor, constant: -20),
+
+            detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            detailLabel.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor, constant: 20),
+            detailLabel.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor, constant: -20),
+            detailLabel.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor, constant: -18)
+        ] + [containerWidthConstraint, containerHeightConstraint].compactMap { $0 })
+    }
+
+    private func rebuildCardsIfNeeded(items: [WindowSwitchItem]) {
+        let windowIDs = items.map { $0.target.windowID }
+        guard windowIDs != currentWindowIDs else {
+            return
+        }
+
+        currentWindowIDs = windowIDs
+
+        for cardView in cardViews {
+            rowStackView.removeArrangedSubview(cardView)
+            cardView.removeFromSuperview()
+        }
+
+        cardViews = items.map { item in
+            let cardView = WindowSwitcherCardView(item: item)
+            cardView.onClick = { [weak self] in
+                guard let self else {
+                    return
+                }
+                guard let index = self.cardViews.firstIndex(where: { $0 === cardView }) else {
+                    return
+                }
+                self.onItemActivated?(index)
+            }
+            rowStackView.addArrangedSubview(cardView)
+            return cardView
+        }
+    }
+
+    private func updateCardLayout(for itemCount: Int) {
+        guard itemCount > 0 else {
+            return
+        }
+
+        let visibleFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+        let maxPanelWidth = max(420, (visibleFrame?.width ?? 1100) - 80)
+        let horizontalPadding: CGFloat = 48
+        let spacing = rowStackView.spacing * CGFloat(max(0, itemCount - 1))
+        let availableCardWidth = (maxPanelWidth - horizontalPadding - spacing) / CGFloat(itemCount)
+        let cardWidth = max(112, min(160, floor(availableCardWidth)))
+        let panelWidth = min(
+            maxPanelWidth,
+            horizontalPadding + spacing + (cardWidth * CGFloat(itemCount))
+        )
+
+        for cardView in cardViews {
+            cardView.updateCardSize(width: cardWidth)
+        }
+
+        containerWidthConstraint?.constant = max(420, panelWidth)
+        containerHeightConstraint?.constant = 246
+    }
+
+    private func updateSelectionState(for session: WindowSwitchSession) {
+        for (index, cardView) in cardViews.enumerated() {
+            cardView.setSelected(index == session.selectedIndex)
+        }
+
+        let selectedItem = session.selectedItem
+        titleLabel.stringValue = selectedItem.target.displayTitle
+        detailLabel.stringValue = "\(selectedItem.target.appName)  •  Window \(session.selectedIndex + 1) of \(session.items.count)"
+    }
+
+    private func fitPanelToScreen() {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+            return
+        }
+
+        panel.setFrame(screen.frame, display: false)
+    }
+}
+
+struct WindowSwitchSession {
+    let items: [WindowSwitchItem]
+    var selectedIndex: Int
+
+    var windows: [WindowSwitchTarget] {
+        items.map(\.target)
+    }
+
+    var selectedItem: WindowSwitchItem {
+        items[selectedIndex]
+    }
+
+    var selectedWindow: WindowSwitchTarget {
+        selectedItem.target
+    }
+}
+
+@MainActor
+final class WindowSwitcherManager {
+    private var tap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var running = false
+    private var commandIsDown = false
+    private var activeSession: WindowSwitchSession?
+
+    private lazy var overlayController: WindowSwitcherOverlayController = {
+        let controller = WindowSwitcherOverlayController()
+        controller.onItemActivated = { [weak self] index in
+            self?.activateItem(at: index)
+        }
+        return controller
+    }()
+
+    func start(promptForPermissions: Bool) -> Bool {
+        guard !running else {
+            return true
+        }
+
+        guard requestAccessibilityTrust(prompt: promptForPermissions) else {
+            return false
+        }
+
+        guard setupEventTap() else {
+            return false
+        }
+
+        running = true
+        return true
+    }
+
+    func stop() {
+        guard running else {
+            return
+        }
+
+        running = false
+        commandIsDown = false
+        finishSwitching(commitSelection: false)
+
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            runLoopSource = nil
+        }
+
+        if let tap {
+            CFMachPortInvalidate(tap)
+            self.tap = nil
+        }
+    }
+
+    func isRunning() -> Bool {
+        running
+    }
+
+    private func requestAccessibilityTrust(prompt: Bool) -> Bool {
+        if AXIsProcessTrusted() {
+            return true
+        }
+
+        guard prompt else {
+            return false
+        }
+
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
+    }
+
+    private func setupEventTap() -> Bool {
+        let mask =
+            CGEventMask(1 << CGEventType.keyDown.rawValue) |
+            CGEventMask(1 << CGEventType.keyUp.rawValue) |
+            CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: windowSwitcherTapCallback,
+            userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        ) else {
+            return false
+        }
+
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            return false
+        }
+
+        self.tap = tap
+        self.runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        return true
+    }
+
+    fileprivate func handleEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passRetained(event)
+        }
+
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+
+        switch type {
+        case .flagsChanged:
+            let isCommandDown = event.flags.contains(.maskCommand)
+            let commandWasDown = commandIsDown
+            commandIsDown = isCommandDown
+
+            if activeSession != nil, commandWasDown, !isCommandDown {
+                finishSwitching(commitSelection: true)
+                return nil
+            }
+
+            return Unmanaged.passRetained(event)
+
+        case .keyDown:
+            if keyCode == KeyboardKeyCode.tab, event.flags.contains(.maskCommand) {
+                commandIsDown = true
+                cycleSelection(reverse: event.flags.contains(.maskShift))
+                return nil
+            }
+
+            if activeSession != nil, keyCode == KeyboardKeyCode.escape {
+                finishSwitching(commitSelection: false)
+                return nil
+            }
+
+            return Unmanaged.passRetained(event)
+
+        case .keyUp:
+            if activeSession != nil, keyCode == KeyboardKeyCode.tab {
+                return nil
+            }
+
+            return Unmanaged.passRetained(event)
+
+        default:
+            return Unmanaged.passRetained(event)
+        }
+    }
+
+    private func cycleSelection(reverse: Bool) {
+        if var session = activeSession {
+            session.selectedIndex = advancedIndex(
+                from: session.selectedIndex,
+                total: session.windows.count,
+                reverse: reverse
+            )
+            activeSession = session
+            presentCurrentSelection()
+            return
+        }
+
+        let windows = WindowCatalog.visibleWindows()
+        guard windows.count > 1 else {
+            return
+        }
+
+        let initialIndex = reverse ? windows.count - 1 : 1
+        let items = windows.map(WindowSnapshotProvider.makeItem(for:))
+        activeSession = WindowSwitchSession(items: items, selectedIndex: initialIndex)
+        presentCurrentSelection()
+    }
+
+    private func presentCurrentSelection() {
+        guard let session = activeSession else {
+            overlayController.hide()
+            return
+        }
+
+        overlayController.show(session: session)
+    }
+
+    private func finishSwitching(commitSelection: Bool) {
+        let selectedWindow = activeSession?.selectedWindow
+        activeSession = nil
+
+        overlayController.hide()
+
+        guard commitSelection, let selectedWindow else {
+            return
+        }
+
+        _ = WindowActivator.activate(selectedWindow)
+    }
+
+    private func activateItem(at index: Int) {
+        guard var session = activeSession, session.items.indices.contains(index) else {
+            return
+        }
+
+        session.selectedIndex = index
+        activeSession = session
+        finishSwitching(commitSelection: true)
+    }
+
+    private func advancedIndex(from currentIndex: Int, total: Int, reverse: Bool) -> Int {
+        guard total > 0 else {
+            return 0
+        }
+
+        let delta = reverse ? -1 : 1
+        return (currentIndex + delta + total) % total
     }
 }
 
@@ -1106,15 +1940,28 @@ private let keyboardCleaningTapCallback: CGEventTapCallBack = { _, type, event, 
     return manager.handleEvent(type: type, event: event)
 }
 
+private let windowSwitcherTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
+    guard let userInfo else {
+        return Unmanaged.passRetained(event)
+    }
+
+    let manager = Unmanaged<WindowSwitcherManager>.fromOpaque(userInfo).takeUnretainedValue()
+    return MainActor.assumeIsolated {
+        manager.handleEvent(type: type, event: event)
+    }
+}
+
 @MainActor
 final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static let keyboardCleaningAutoDisableSeconds: TimeInterval = 120.0
 
     private var settings: EngineSettings
     private var engineEnabled: Bool
+    private var windowSwitcherEnabled: Bool
     private var keyboardCleaningEnabled = false
 
     private let engine: ScrollEngine
+    private let windowSwitcherManager = WindowSwitcherManager()
     private let keyboardCleaningManager = KeyboardCleaningManager()
     private let launchAgentManager = LaunchAgentManager()
 
@@ -1122,6 +1969,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let menu = NSMenu()
 
     private var enabledItem: NSMenuItem?
+    private var windowSwitcherItem: NSMenuItem?
     private var keyboardCleaningItem: NSMenuItem?
     private var saveSettingsItem: NSMenuItem?
     private var launchAtLoginItem: NSMenuItem?
@@ -1141,9 +1989,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var decayLabel: NSTextField?
     private var fpsLabel: NSTextField?
 
-    init(settings: EngineSettings, enabled: Bool) {
+    init(settings: EngineSettings, enabled: Bool, windowSwitcherEnabled: Bool) {
         self.settings = settings.clamped
         self.engineEnabled = enabled
+        self.windowSwitcherEnabled = windowSwitcherEnabled
         self.engine = ScrollEngine(settings: settings)
         super.init()
         self.engine.onToggleEnabledRequested = { [weak self] in
@@ -1156,11 +2005,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         constructMenuBarUI()
         applySystemPointerSpeed()
         applyEngineEnabledState(promptForPermissions: true)
+        applyWindowSwitcherEnabledState(promptForPermissions: true)
         updateMenuState()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         disableKeyboardCleaning(showTimeoutAlert: false)
+        windowSwitcherManager.stop()
         engine.stop()
     }
 
@@ -1175,6 +2026,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         engineEnabled.toggle()
         SettingsStore.saveEnabled(engineEnabled)
         applyEngineEnabledState(promptForPermissions: true)
+        updateMenuState()
+    }
+
+    @objc private func toggleWindowSwitcher(_ sender: NSMenuItem) {
+        windowSwitcherEnabled.toggle()
+        SettingsStore.saveWindowSwitcherEnabled(windowSwitcherEnabled)
+        applyWindowSwitcherEnabledState(promptForPermissions: true)
         updateMenuState()
     }
 
@@ -1307,6 +2165,14 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         enabledItem = NSMenuItem(title: "Enabled", action: #selector(toggleEngine(_:)), keyEquivalent: "")
         enabledItem?.target = self
         if let enabledItem { menu.addItem(enabledItem) }
+
+        windowSwitcherItem = NSMenuItem(
+            title: "Window Switcher (Cmd+Tab)",
+            action: #selector(toggleWindowSwitcher(_:)),
+            keyEquivalent: ""
+        )
+        windowSwitcherItem?.target = self
+        if let windowSwitcherItem { menu.addItem(windowSwitcherItem) }
 
         keyboardCleaningItem = NSMenuItem(
             title: "Enable Keyboard Cleaning",
@@ -1548,6 +2414,25 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func applyWindowSwitcherEnabledState(promptForPermissions: Bool) {
+        if windowSwitcherEnabled {
+            if !windowSwitcherManager.isRunning() {
+                let started = windowSwitcherManager.start(promptForPermissions: promptForPermissions)
+                if !started {
+                    windowSwitcherEnabled = false
+                    SettingsStore.saveWindowSwitcherEnabled(false)
+                    showAlert(
+                        title: "Permissions Required",
+                        message: "Enable Accessibility and Input Monitoring for SmoothScroll in System Settings > Privacy & Security."
+                    )
+                    return
+                }
+            }
+        } else {
+            windowSwitcherManager.stop()
+        }
+    }
+
     private func toggleEngineFromMouseButton() {
         engineEnabled.toggle()
         SettingsStore.saveEnabled(engineEnabled)
@@ -1571,6 +2456,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings = settings.clamped
         SettingsStore.saveSettings(settings)
         SettingsStore.saveEnabled(engineEnabled)
+        SettingsStore.saveWindowSwitcherEnabled(windowSwitcherEnabled)
     }
 
     private func setSideButtonAction(_ action: MouseButtonAction, for slot: SideMouseButtonSlot) {
@@ -1674,6 +2560,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateMenuState() {
         enabledItem?.state = engineEnabled ? .on : .off
+        windowSwitcherItem?.state = windowSwitcherEnabled ? .on : .off
         keyboardCleaningItem?.state = keyboardCleaningEnabled ? .on : .off
         keyboardCleaningItem?.title = keyboardCleaningEnabled ? "Disable Keyboard Cleaning" : "Enable Keyboard Cleaning"
 
@@ -1727,11 +2614,16 @@ struct SmoothScroll {
         SettingsStore.saveSettings(settings)
 
         let enabled = SettingsStore.loadEnabled()
+        let windowSwitcherEnabled = SettingsStore.loadWindowSwitcherEnabled()
 
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
-        let delegate = MenuBarController(settings: settings, enabled: enabled)
+        let delegate = MenuBarController(
+            settings: settings,
+            enabled: enabled,
+            windowSwitcherEnabled: windowSwitcherEnabled
+        )
         app.delegate = delegate
         app.run()
     }
