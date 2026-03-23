@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import IOKit
 import IOKit.hidsystem
@@ -12,6 +13,9 @@ enum PointerSpeedManager {
     ]
     private static let fallbackPointerSpeed = 5.0
     private static let systemRange: ClosedRange<Double> = 0.0...20.0
+    // These legacy IOKit entry points still control the live pointer acceleration path.
+    // Resolve them dynamically so builds stay warning-free while preserving runtime behavior.
+    private static let runtimeAPI = HIDRuntimeAPI()
 
     static func currentSystemValue() -> Double {
         if let systemValue = readRuntimeSystemSpeed() {
@@ -51,10 +55,14 @@ enum PointerSpeedManager {
     }
 
     private static func readRuntimeSystemSpeed() -> Double? {
+        guard let getAccelerationWithKey = runtimeAPI.getAccelerationWithKey else {
+            return nil
+        }
+
         withHIDEventStatusHandle { handle in
             for key in hidAccelerationKeys {
                 var value = 0.0
-                if IOHIDGetAccelerationWithKey(handle, key as CFString, &value) == KERN_SUCCESS {
+                if getAccelerationWithKey(handle, key as CFString, &value) == KERN_SUCCESS {
                     return clampValue(value, to: systemRange)
                 }
             }
@@ -63,21 +71,30 @@ enum PointerSpeedManager {
     }
 
     private static func applyRuntimeSystemSpeed(_ value: Double) {
+        guard let setAccelerationWithKey = runtimeAPI.setAccelerationWithKey else {
+            return
+        }
+
         _ = withHIDEventStatusHandle { handle in
             for key in hidAccelerationKeys {
-                _ = IOHIDSetAccelerationWithKey(handle, key as CFString, value)
+                _ = setAccelerationWithKey(handle, key as CFString, value)
             }
             return true
         }
     }
 
     private static func withHIDEventStatusHandle<T>(_ body: (NXEventHandle) -> T?) -> T? {
-        let handle = NXOpenEventStatus()
+        guard let openEventStatus = runtimeAPI.openEventStatus,
+              let closeEventStatus = runtimeAPI.closeEventStatus else {
+            return nil
+        }
+
+        let handle = openEventStatus()
         guard handle != 0 else {
             return nil
         }
         defer {
-            NXCloseEventStatus(handle)
+            closeEventStatus(handle)
         }
         return body(handle)
     }
@@ -135,5 +152,41 @@ enum PointerSpeedManager {
         let uiSpan = TuningLimits.pointerSpeed.upperBound - TuningLimits.pointerSpeed.lowerBound
         let normalized = (systemSpeed - systemRange.lowerBound) / systemSpan
         return clampValue(TuningLimits.pointerSpeed.lowerBound + normalized * uiSpan, to: TuningLimits.pointerSpeed)
+    }
+}
+
+private struct HIDRuntimeAPI {
+    typealias OpenEventStatusFn = @convention(c) () -> NXEventHandle
+    typealias CloseEventStatusFn = @convention(c) (NXEventHandle) -> Void
+    typealias GetAccelerationWithKeyFn = @convention(c) (
+        io_connect_t,
+        CFString,
+        UnsafeMutablePointer<Double>
+    ) -> kern_return_t
+    typealias SetAccelerationWithKeyFn = @convention(c) (
+        io_connect_t,
+        CFString,
+        Double
+    ) -> kern_return_t
+
+    let openEventStatus: OpenEventStatusFn?
+    let closeEventStatus: CloseEventStatusFn?
+    let getAccelerationWithKey: GetAccelerationWithKeyFn?
+    let setAccelerationWithKey: SetAccelerationWithKeyFn?
+
+    init() {
+        let handle = dlopen("/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit", RTLD_LAZY)
+        openEventStatus = Self.loadSymbol(named: "NXOpenEventStatus", from: handle)
+        closeEventStatus = Self.loadSymbol(named: "NXCloseEventStatus", from: handle)
+        getAccelerationWithKey = Self.loadSymbol(named: "IOHIDGetAccelerationWithKey", from: handle)
+        setAccelerationWithKey = Self.loadSymbol(named: "IOHIDSetAccelerationWithKey", from: handle)
+    }
+
+    private static func loadSymbol<Function>(named symbolName: String, from handle: UnsafeMutableRawPointer?) -> Function? {
+        guard let handle, let symbol = dlsym(handle, symbolName) else {
+            return nil
+        }
+
+        return unsafeBitCast(symbol, to: Function.self)
     }
 }
