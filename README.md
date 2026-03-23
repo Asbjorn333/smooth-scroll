@@ -207,7 +207,13 @@ Scrolling feels too fast or too floaty:
 
 ## Project layout
 
-- `Sources/SmoothScroll/SmoothScroll.swift`: app, engine, menu UI
+- `Sources/SmoothScroll/App/`: app entry point and headless startup
+- `Sources/SmoothScroll/Settings/`: tuning ranges, CLI parsing, persisted settings
+- `Sources/SmoothScroll/System/`: pointer speed, launch agent, accessibility helpers
+- `Sources/SmoothScroll/Features/Scrolling/`: smooth scrolling engine
+- `Sources/SmoothScroll/Features/KeyboardCleaning/`: keyboard cleaning mode
+- `Sources/SmoothScroll/Features/WindowSwitcher/`: window switcher models, logic, and overlay UI
+- `Sources/SmoothScroll/MenuBar/`: menu bar controller, actions, menu construction, and state sync
 - `scripts/build-app.sh`: builds `.app` bundle
 - `scripts/generate-icon.sh`: generates `AppIcon.icns`
 - `scripts/install-app.sh`: installs app to Desktop or custom dir
