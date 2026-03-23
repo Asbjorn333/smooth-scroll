@@ -59,7 +59,7 @@ enum PointerSpeedManager {
             return nil
         }
 
-        withHIDEventStatusHandle { handle in
+        return withHIDEventStatusHandle { handle in
             for key in hidAccelerationKeys {
                 var value = 0.0
                 if getAccelerationWithKey(handle, key as CFString, &value) == KERN_SUCCESS {
