@@ -44,7 +44,7 @@ final class WindowSwitcherOverlayController {
     private func configurePanel() {
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = false
         panel.level = .statusBar
@@ -55,28 +55,29 @@ final class WindowSwitcherOverlayController {
 
         backdropView.translatesAutoresizingMaskIntoConstraints = false
         backdropView.wantsLayer = true
-        backdropView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.14).cgColor
+        backdropView.layer?.backgroundColor = NSColor.clear.cgColor
 
         chromeView.translatesAutoresizingMaskIntoConstraints = false
-        chromeView.material = .hudWindow
-        chromeView.blendingMode = .withinWindow
+        chromeView.material = .underWindowBackground
+        chromeView.blendingMode = .behindWindow
         chromeView.state = .active
         chromeView.wantsLayer = true
         chromeView.layer?.cornerRadius = 26
         chromeView.layer?.masksToBounds = true
-        chromeView.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        chromeView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.36).cgColor
+        chromeView.layer?.borderColor = NSColor.white.withAlphaComponent(0.05).cgColor
         chromeView.layer?.borderWidth = 1
 
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.alignment = .center
-        titleLabel.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
+        titleLabel.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingMiddle
 
         detailLabel.translatesAutoresizingMaskIntoConstraints = false
         detailLabel.alignment = .center
-        detailLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        detailLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.lineBreakMode = .byTruncatingTail
 
@@ -84,7 +85,7 @@ final class WindowSwitcherOverlayController {
         rowStackView.orientation = .horizontal
         rowStackView.alignment = .top
         rowStackView.distribution = .fill
-        rowStackView.spacing = 12
+        rowStackView.spacing = 18
 
         blockerView.addSubview(backdropView)
         blockerView.addSubview(chromeView)
@@ -94,8 +95,8 @@ final class WindowSwitcherOverlayController {
         contentContainer.addSubview(detailLabel)
         panel.contentView = blockerView
 
-        containerWidthConstraint = contentContainer.widthAnchor.constraint(equalToConstant: 760)
-        containerHeightConstraint = contentContainer.heightAnchor.constraint(equalToConstant: 246)
+        containerWidthConstraint = contentContainer.widthAnchor.constraint(equalToConstant: 980)
+        containerHeightConstraint = contentContainer.heightAnchor.constraint(equalToConstant: 320)
 
         NSLayoutConstraint.activate([
             backdropView.leadingAnchor.constraint(equalTo: blockerView.leadingAnchor),
@@ -111,12 +112,12 @@ final class WindowSwitcherOverlayController {
             contentContainer.topAnchor.constraint(equalTo: chromeView.topAnchor),
             contentContainer.bottomAnchor.constraint(equalTo: chromeView.bottomAnchor),
 
-            rowStackView.leadingAnchor.constraint(greaterThanOrEqualTo: contentContainer.leadingAnchor, constant: 24),
-            rowStackView.trailingAnchor.constraint(lessThanOrEqualTo: contentContainer.trailingAnchor, constant: -24),
-            rowStackView.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: 24),
+            rowStackView.leadingAnchor.constraint(greaterThanOrEqualTo: contentContainer.leadingAnchor, constant: 30),
+            rowStackView.trailingAnchor.constraint(lessThanOrEqualTo: contentContainer.trailingAnchor, constant: -30),
+            rowStackView.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: 28),
             rowStackView.centerXAnchor.constraint(equalTo: contentContainer.centerXAnchor),
 
-            titleLabel.topAnchor.constraint(equalTo: rowStackView.bottomAnchor, constant: 16),
+            titleLabel.topAnchor.constraint(equalTo: rowStackView.bottomAnchor, constant: 18),
             titleLabel.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor, constant: 20),
             titleLabel.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor, constant: -20),
 
@@ -162,22 +163,23 @@ final class WindowSwitcherOverlayController {
         }
 
         let visibleFrame = screen?.visibleFrame ?? panel.screen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame
-        let maxPanelWidth = max(420, (visibleFrame?.width ?? 1100) - 80)
-        let horizontalPadding: CGFloat = 48
+        let maxPanelWidth = max(640, (visibleFrame?.width ?? 1400) - 56)
+        let horizontalPadding: CGFloat = 72
         let spacing = rowStackView.spacing * CGFloat(max(0, itemCount - 1))
         let availableCardWidth = (maxPanelWidth - horizontalPadding - spacing) / CGFloat(itemCount)
-        let cardWidth = max(112, min(160, floor(availableCardWidth)))
+        let cardWidth = max(180, min(236, floor(availableCardWidth)))
         let panelWidth = min(
             maxPanelWidth,
             horizontalPadding + spacing + (cardWidth * CGFloat(itemCount))
         )
+        let cardHeight = WindowSwitcherCardView.cardHeight(for: cardWidth)
 
         for cardView in cardViews {
             cardView.updateCardSize(width: cardWidth)
         }
 
-        containerWidthConstraint?.constant = max(420, panelWidth)
-        containerHeightConstraint?.constant = 246
+        containerWidthConstraint?.constant = max(640, panelWidth)
+        containerHeightConstraint?.constant = max(320, cardHeight + 108)
     }
 
     private func updateSelectionState(for session: WindowSwitchSession) {

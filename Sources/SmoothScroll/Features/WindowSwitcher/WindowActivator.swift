@@ -7,10 +7,20 @@ enum WindowActivator {
         let runningApplication = NSRunningApplication(processIdentifier: target.processID)
         let applicationElement = AXUIElementCreateApplication(target.processID)
         let windows = copyWindowElements(from: applicationElement)
+        let windowServerFocusSucceeded = WindowServerWindowFocuser.focus(
+            processID: target.processID,
+            windowID: target.windowID
+        )
 
         if let matchingWindow = matchingWindow(for: target, in: windows) {
-            runningApplication?.activate(options: [.activateIgnoringOtherApps])
-            return focus(window: matchingWindow, in: applicationElement)
+            let axFocusSucceeded = focus(window: matchingWindow, in: applicationElement)
+            if windowServerFocusSucceeded || axFocusSucceeded {
+                return true
+            }
+        }
+
+        if windowServerFocusSucceeded {
+            return true
         }
 
         guard let runningApplication else {

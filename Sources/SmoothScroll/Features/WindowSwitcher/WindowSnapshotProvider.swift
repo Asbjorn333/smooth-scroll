@@ -2,7 +2,7 @@
 @preconcurrency import CoreGraphics
 
 enum WindowSnapshotProvider {
-    private static let maximumPreviewSize = NSSize(width: 220, height: 140)
+    private static let maximumPreviewSize = NSSize(width: 360, height: 220)
 
     static func makeItem(for target: WindowSwitchTarget) -> WindowSwitchItem {
         let appIcon = NSRunningApplication(processIdentifier: target.processID)?.icon
