@@ -48,9 +48,10 @@ enum WindowCatalog {
                 continue
             }
 
-            let bounds = windowInfo[kCGWindowBounds as String] as? [String: Any]
-            let width = (bounds?["Width"] as? NSNumber)?.doubleValue ?? 0
-            let height = (bounds?["Height"] as? NSNumber)?.doubleValue ?? 0
+            let boundsDictionary = windowInfo[kCGWindowBounds as String] as? [String: Any]
+            let bounds = boundsDictionary.flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) } ?? .zero
+            let width = bounds.width
+            let height = bounds.height
             guard width >= minimumWidth, height >= minimumHeight else {
                 continue
             }
@@ -68,7 +69,8 @@ enum WindowCatalog {
                     windowID: windowID,
                     processID: ownerPID,
                     appName: ownerName,
-                    windowTitle: title
+                    windowTitle: title,
+                    bounds: bounds
                 )
             )
         }

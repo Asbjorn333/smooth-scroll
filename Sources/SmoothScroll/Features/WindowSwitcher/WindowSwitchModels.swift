@@ -6,6 +6,7 @@ struct WindowSwitchTarget {
     let processID: pid_t
     let appName: String
     let windowTitle: String
+    let bounds: CGRect
 
     var displayTitle: String {
         windowTitle.isEmpty ? appName : windowTitle

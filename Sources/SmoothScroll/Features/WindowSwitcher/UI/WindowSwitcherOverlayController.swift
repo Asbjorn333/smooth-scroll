@@ -29,9 +29,10 @@ final class WindowSwitcherOverlayController {
     }
 
     func show(session: WindowSwitchSession) {
-        fitPanelToScreen()
+        let targetScreen = WindowSwitcherScreenLocator.screenContainingPointer()
+        fitPanelToScreen(targetScreen)
         rebuildCardsIfNeeded(items: session.items)
-        updateCardLayout(for: session.items.count)
+        updateCardLayout(for: session.items.count, on: targetScreen)
         updateSelectionState(for: session)
         panel.orderFrontRegardless()
     }
@@ -155,12 +156,12 @@ final class WindowSwitcherOverlayController {
         }
     }
 
-    private func updateCardLayout(for itemCount: Int) {
+    private func updateCardLayout(for itemCount: Int, on screen: NSScreen?) {
         guard itemCount > 0 else {
             return
         }
 
-        let visibleFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+        let visibleFrame = screen?.visibleFrame ?? panel.screen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame
         let maxPanelWidth = max(420, (visibleFrame?.width ?? 1100) - 80)
         let horizontalPadding: CGFloat = 48
         let spacing = rowStackView.spacing * CGFloat(max(0, itemCount - 1))
@@ -189,8 +190,8 @@ final class WindowSwitcherOverlayController {
         detailLabel.stringValue = "\(selectedItem.target.appName)  •  Window \(session.selectedIndex + 1) of \(session.items.count)"
     }
 
-    private func fitPanelToScreen() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
+    private func fitPanelToScreen(_ screen: NSScreen?) {
+        guard let screen = screen ?? panel.screen ?? NSScreen.screens.first else {
             return
         }
 
